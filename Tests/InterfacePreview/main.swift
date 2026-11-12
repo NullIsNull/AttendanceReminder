@@ -11,9 +11,11 @@ let store = try StateStore(directory: directory)
 final class RecordingAudio: ReminderSoundPlaying {
     var plays: [[String: Any]] = []
     private let audio = ReminderAudio()
-    func play(_ choice: SoundChoice, volume: Float) {
-        plays.append(["time": Date().ISO8601Format(), "volume": volume, "sound": choice.rawValue])
-        audio.play(choice, volume: volume)
+    @discardableResult func play(_ choice: SoundChoice, volume: Float) -> Bool {
+        let started = audio.play(choice, volume: volume)
+        plays.append(["time": Date().ISO8601Format(), "volume": volume, "sound": choice.rawValue,
+                      "started": started, "isPlaying": audio.isPlaying])
+        return started
     }
     func stop() { audio.stop() }
 }
@@ -25,12 +27,16 @@ if try store.loadPreferences() == nil {
     let now = Date()
     let calendar = Schedule.calendar()
     var state = try store.loadOrCreate(now: now, calendar: calendar)
-    if mode == "due" || mode == "confirmed" || mode == "rescheduled" {
+    if ["due", "confirmed", "rescheduled", "both", "background"].contains(mode) {
         let nextMinute = Date(timeIntervalSince1970: (floor(now.timeIntervalSince1970 / 60) + 1) * 60)
         guard (2...6).contains(calendar.component(.weekday, from: now)),
               calendar.component(.hour, from: now) < 23 else { fatalError("Run the due fixture on a weekday before 23:00") }
         preferences.morning = String(format: "%02d:%02d", calendar.component(.hour, from: nextMinute), calendar.component(.minute, from: nextMinute))
         preferences.maximumVolume = 0.3
+        if mode == "both" || mode == "background" {
+            let evening = nextMinute.addingTimeInterval(60)
+            preferences.evening = String(format: "%02d:%02d", calendar.component(.hour, from: evening), calendar.component(.minute, from: evening))
+        }
         if mode == "confirmed" || mode == "rescheduled" {
             let day = Schedule.dayKey(now, calendar: calendar)
             let event = ReminderEvent(day: day, slot: .morning, scheduledAt: now, timeZone: calendar.timeZone.identifier)
@@ -48,11 +54,13 @@ if try store.loadPreferences() == nil {
 let blocker = mode == "conflict" ? try InstanceLock(directory: directory) : nil
 let application = NSApplication.shared
 if configuration["TestDarkAppearance"] as? Bool == true { application.appearance = NSAppearance(named: .darkAqua) }
-let delegate = ReminderApplication(directory: directory, preview: mode == "reminder", silent: !["due", "confirmed", "rescheduled"].contains(mode),
-    autoExit: nil, times: nil, settingsPreview: false, openSettingsAtLaunch: mode != "reminder",
+let delegate = ReminderApplication(directory: directory, preview: mode == "reminder", silent: !["due", "confirmed", "rescheduled", "both", "background"].contains(mode),
+    autoExit: nil, times: nil, settingsPreview: false, openSettingsAtLaunch: !["reminder", "background"].contains(mode),
     startup: LoginStartup(preview: true), audio: recordingAudio)
 application.delegate = delegate
 let snapshotURL = directory.deletingLastPathComponent().appendingPathComponent("status-\(mode).json")
+var transitions: [[String: Any]] = []
+var previousSnapshot: Data?
 let observer = Timer(timeInterval: 0.25, repeats: true) { _ in
     Task { @MainActor in
         let settingsWindow = application.windows.first { $0.title == "AttendanceReminder 设置" && $0.isVisible }
@@ -69,10 +77,21 @@ let observer = Timer(timeInterval: 0.25, repeats: true) { _ in
             "settingsScrollOverflow": max(0, (scroll?.documentView?.frame.height ?? 0) - (scroll?.contentView.bounds.height ?? 0)),
             "reminderWindows": visiblePanels.count,
             "reminderSizes": visiblePanels.map { ["width": $0.frame.width, "height": $0.frame.height] },
-            "audioPlays": recordingAudio.plays
+            "audioPlays": recordingAudio.plays,
+            "systemAudioWarning": SystemAudioStatus.warning() ?? "",
+            "reminderTitles": visiblePanels.map { $0.accessibilityLabel() ?? "" }
         ]
         if let data = try? JSONSerialization.data(withJSONObject: snapshot, options: .sortedKeys) {
             try? data.write(to: snapshotURL, options: .atomic)
+            if data != previousSnapshot {
+                var transition = snapshot
+                transition["observedAt"] = Date().ISO8601Format()
+                transitions.append(transition)
+                previousSnapshot = data
+                if let history = try? JSONSerialization.data(withJSONObject: transitions, options: .sortedKeys) {
+                    try? history.write(to: directory.deletingLastPathComponent().appendingPathComponent("transitions-\(mode).json"), options: .atomic)
+                }
+            }
         }
     }
 }

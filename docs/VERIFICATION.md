@@ -1,6 +1,6 @@
 # 验证记录
 
-版本：2.1.2。日期：2026-11-12，Asia/Singapore。环境：Apple Silicon、macOS 27.2（26B123）、Apple Swift 6.4.2、Command Line Tools。
+版本：2.1.3。日期：2026-11-12，Asia/Singapore。环境：Apple Silicon、macOS 27.2（26B123）、Apple Swift 6.4.2、Command Line Tools。
 
 ## 编译与自动检查
 
@@ -8,13 +8,27 @@
 | --- | --- |
 | 原生编译 | arm64、x86_64 均成功，Universal 2，最低运行目标 macOS 13 |
 | 本地签名 | codesign 严格验证通过，隔离安装副本也通过 |
-| 核心逻辑 | 62 项测试通过，0 项失败 |
+| 核心逻辑 | 70 项测试通过，0 项失败 |
+| 音频对象 | 11 项播放和隔离检查通过；测试音量为 0，未测量扬声器输出 |
 | 命令行 | 默认、单参数、双参数、中文冒号、非法参数拒绝且不写状态通过 |
 | 隔离安装与卸载 | 更新保留设置和确认记录，默认卸载保留数据，重装沿用，清除模式删除测试数据 |
 | Intel 指令执行 | Rosetta 下 x86_64 命令输出 10:10 / 19:10 |
 | DMG | HFS+、UDZO；hdiutil verify 校验通过，打包内容仅应用和 Applications 链接 |
 
 核心测试覆盖调度边界、工作日和周末、唤醒补提醒计算、跨天遗漏、确认持久化和去重、时区与夏令时、损坏文件、写入失败、锁、暂停、音量渐强及设置持久化。
+
+## 2.1.3 到点与独立确认回归
+
+- 先复现旧版：设置保持打开，14:14 到点产生声音调用，但窗口数仍为 0。这是 2.1.2 的界面抑制规则，不是时间未保存。
+- 新版 `due` 样本：设置保持打开，14:21:00 自动收起设置，在两台显示器上出现上班窗口。音频在 14:21:00、14:21:30 返回播放成功且 `isPlaying=true`，音量为 6%、12%。
+- 到点前将未保存的音量改为 55%；返回设置仍为 55%，关闭未保存后再打开恢复已保存的 30%。新提醒不会丢失编辑内容。
+- 设置显示独立的上班、下班状态和统计；系统静音时显示橙色提示，三块区域仍可完整显示，滚动溢出为 0。
+- `both` 样本：14:42:02 出现上班提醒，14:43:02 出现下班提醒，两项分别写入确认。再次修改两项时间后，两项均回到待确认。
+- 两项同时待确认时，点击“查看下班打卡”并点击“下班已打卡”，窗口返回上班，显示上班待确认 1 项、下班 0 项；再确认上班后，设置与菜单分别显示上班、下班各确认 2 次。文件中当前记录和历史记录与显示一致。
+- `background` 样本启动后没有设置窗口，14:50:03 自动显示上班；上班保持未确认时，14:51:03 自动切换为下班。此时确认文件仍为空，两项待办都保留；先确认下班再确认上班均成功。
+- 关闭并重新启动已完成两项确认的 `background` 副本，继续观察超过 30 秒；窗口数为 0、声音播放次数为 0，确认文件字节未变。
+- 70 项核心测试覆盖设置打开时新到点显示、已有提醒编辑、未确认上班遇到新下班、手动选择时段、再次设定时间，以及按日期和时段分别统计历史。
+- 11 项音频检查覆盖进入实际播放状态、停止试听不停止提醒、5 种系统音效和内置音效可播放、静音选项不播放。测试自身音量为 0，不改系统音量。
 
 ## 2.1.2 提醒规则回归
 
@@ -25,6 +39,8 @@
 - 新设置或再次确认写盘失败时，生效设置、确认文件和内存状态均未前移。
 
 ## 2.1.2 界面验证
+
+以下为上一版记录；设置打开时新到点自动弹窗及独立统计以 2.1.3 记录为准。
 
 - 隔离 `rescheduled` 样本先写入今日已确认状态，再通过实际设置窗口修改并保存上班时间，确认窗口重新出现；点击“已打卡”后状态变为已确认，再次修改时间后又出现提醒。
 - 样本声音记录中，12:56:00、12:56:32 调用 Ping，音量依次为 6%、12%；再次修改后 12:57:03 从 6% 重新开始。这是播放调用验证，未测量扬声器实际输出。
@@ -69,6 +85,7 @@
 bash test.sh
 bash build.sh
 bash Tests/cli.sh
+bash Tests/audio.sh
 bash Tests/integration.sh
 bash package-dmg.sh --no-build
 bash Tests/interface-preview.sh /absolute/test-directory settings
@@ -77,15 +94,17 @@ bash Tests/interface-preview.sh /absolute/test-directory reminder dark
 bash Tests/interface-preview.sh /absolute/test-directory due
 bash Tests/interface-preview.sh /absolute/test-directory confirmed
 bash Tests/interface-preview.sh /absolute/test-directory rescheduled
+bash Tests/interface-preview.sh /absolute/test-directory both
+bash Tests/interface-preview.sh /absolute/test-directory background
 ```
 
-界面测试程序不随正式应用分发。`conflict` 模式故意保持文件锁占用，用于验证错误后的交互；最多运行 5 分钟。`due`、`confirmed` 和 `rescheduled` 在工作日 23:00 前运行，首次启动时把上班设为下一分钟，分别创建未确认、已确认和确认后重设时间的样本。其状态目录内记录及同级 `status-*.json` 均为测试数据；状态文件包含窗口数量和声音调用记录。
+界面测试程序不随正式应用分发。`conflict` 模式故意保持文件锁占用，用于验证错误后的交互；最多运行 5 分钟。`due`、`confirmed` 和 `rescheduled` 在工作日 23:00 前运行，首次启动时把上班设为下一分钟，分别创建未确认、已确认和确认后重设时间的样本。其状态目录内记录及同级 `status-*.json` 均为测试数据；状态文件包含窗口数量、标题、设置溢出高度、系统静音提示，以及声音是否成功进入播放状态；`transitions-*.json` 保留状态变化。`both` 使用连续两分钟的上下班提醒；`background` 使用相同时间但启动时不打开设置。
 
 ## 验证边界
 
 未通过 Finder 实际挂载新版 DMG 并拖入“应用程序”，未切换系统减少透明度和增加对比度设置，未逐一实测旧版 macOS、Intel 实体机和其他应用的全屏空间。兼容外观与 Dock 隐藏依据是代码分支、系统颜色和 LSUIElement / accessory 配置。
 
-未注册、注销真实登录项，未进行旧版 LaunchAgent 完整迁移、实际睡眠、重启或注销登录。没有修改或清空用户的正式确认记录。跨进程通知回执分支尚未单独完成双进程交互验收；文件锁占用场景已通过上述界面回归。
+未注册、注销真实登录项，未进行旧版 LaunchAgent 完整迁移、Mac 实际睡眠、重启或注销登录。没有修改或清空用户的正式确认记录。跨进程通知回执分支尚未单独完成双进程交互验收；文件锁占用场景已通过上述界面回归。
 
 当前环境不能使用 DiskManagement 服务，打包采用 `makehybrid -hfs` 生成文件后转为 UDZO，无需挂载临时磁盘。Intel 编译有工具链缺少 x86_64 的 `libswiftCompatibilityPacks.a` 警告，链接和 Rosetta 命令仍通过。
 

@@ -19,7 +19,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private var pausedUntil: Date?
     private var awaitingSetup = false
     private var settingsController: SettingsWindow?
-    private var scheduleItem: NSMenuItem?
+    private var slotItems: [PunchSlot: NSMenuItem] = [:]
     private var summaryItem: NSMenuItem?
     private var resumeItem: NSMenuItem?
     private let startup: LoginStartup
@@ -39,6 +39,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private var previewFinished = false
     private let audio: ReminderSoundPlaying
     private var soundRamp = SoundRamp()
+    private var presentation = ReminderPresentation()
 
     init(directory: URL, preview: Bool, silent: Bool, autoExit: TimeInterval?, times: ReminderTimes?, settingsPreview: Bool, openSettingsAtLaunch: Bool, startup: LoginStartup? = nil,
          audio: ReminderSoundPlaying = ReminderAudio()) {
@@ -123,22 +124,28 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private func configureMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        scheduleItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        for (index, slot) in PunchSlot.allCases.enumerated() {
+            let item = NSMenuItem(title: slot.title, action: slot == .morning ? #selector(showMorning) : #selector(showEvening), keyEquivalent: "")
+            item.target = self
+            item.tag = 100 + index
+            item.image = Appearance.menuIcon(slot == .morning ? "sun.max" : "moon")
+            slotItems[slot] = item
+            menu.addItem(item)
+        }
         summaryItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        scheduleItem?.isEnabled = false
         summaryItem?.isEnabled = false
-        menu.addItem(scheduleItem!)
+        summaryItem?.tag = 102
         menu.addItem(summaryItem!)
         menu.addItem(.separator())
         let settings = NSMenuItem(title: "设置…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         settings.image = Appearance.menuIcon("slider.horizontal.3")
         menu.addItem(settings)
-        addMenuItem("显示提醒 / 今日状态", action: #selector(showStatus), to: menu)
         menu.addItem(.separator())
         addMenuItem("暂停 15 分钟", action: #selector(pauseReminders), to: menu)
         resumeItem = NSMenuItem(title: "立即恢复提醒", action: #selector(resumeReminders), keyEquivalent: "")
         resumeItem?.target = self
+        resumeItem?.tag = 103
         resumeItem?.image = Appearance.menuIcon("play.circle")
         menu.addItem(resumeItem!)
         let quit = NSMenuItem(title: "紧急退出…", action: #selector(emergencyExit), keyEquivalent: "q")
@@ -180,7 +187,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private func addMenuItem(_ title: String, action: Selector, to menu: NSMenu) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
-        let symbols = ["显示提醒 / 今日状态": "checkmark.circle", "暂停 15 分钟": "pause.circle"]
+        let symbols = ["暂停 15 分钟": "pause.circle"]
         if let symbol = symbols[title] { item.image = Appearance.menuIcon(symbol) }
         menu.addItem(item)
     }
@@ -224,6 +231,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         if settingsPreview || awaitingSetup { return }
         if let until = pausedUntil, until > now {
             closePanels()
+            audio.stop()
             event = nil
             displayedID = nil
             lastSound = nil
@@ -234,41 +242,45 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         pausedUntil = nil
         if problem != nil {
             closePanels()
+            audio.stop()
             updateStatusTitle(calendar: calendar, now: now)
             return
         }
-        let pending = state.map { Schedule.pending(state: $0, now: now, calendar: calendar, times: times) } ?? []
-        let next: ReminderEvent?
+        var pending = pendingEvents(now: now, calendar: calendar)
         if preview {
             let day = Schedule.dayKey(now, calendar: calendar)
-            next = ReminderEvent(day: day, slot: .morning, scheduledAt: now, timeZone: calendar.timeZone.identifier)
-        } else {
-            next = pending.first
+            let scheduledAt = calendar.startOfDay(for: now)
+            pending = [ReminderEvent(day: day, slot: .morning, scheduledAt: scheduledAt, timeZone: calendar.timeZone.identifier)]
         }
-        guard let next = next else {
+        let next = presentation.next(pending: pending)
+        guard let soundingEvent = next ?? pending.first else {
             event = nil
             displayedID = nil
             closePanels()
+            audio.stop()
             lastSound = nil
             soundRamp.reset()
             updateStatusTitle(calendar: calendar, now: now)
             return
         }
-        if event?.id != next.id {
+        if event?.presentationID != soundingEvent.presentationID {
             lastSound = nil
             soundRamp.reset()
         }
-        event = next
-        let identifier = "\(next.id)/\(next.timeZone)/\(pending.count)"
-        if !editing && displayedID != identifier {
-            let missed = next.day != Schedule.dayKey(now, calendar: calendar) ? "历史补提醒 · " : ""
-            let title = preview ? "提醒演示 · 上班打卡" : "\(missed)\(next.slot.title)"
-            let detail = "\(next.day)  ·  \(next.timeZone)\n请先完成公司考勤打卡，再点击下方按钮。"
-            let footer = preview ? "演示不会生成确认记录。" : "本机确认不等于考勤提交。还有 \(pending.count) 项待确认。"
-            showPanels(title: title, time: times.time(for: next.slot).text, detail: detail, footer: footer)
-            displayedID = identifier
-        }
-        if !editing && !dialogOpen {
+        event = soundingEvent
+        if let next = next {
+            // Preserve unsaved fields while a newly due reminder takes the foreground.
+            if editing { settingsController?.hideForReminder() }
+            let identifier = "\(next.presentationID)/\(pending.count)"
+            if displayedID != identifier || panels.isEmpty {
+                let missed = next.day != Schedule.dayKey(now, calendar: calendar) ? "历史补提醒 · " : ""
+                let title = preview ? "提醒演示 · 上班打卡" : "\(missed)\(next.slot.title)"
+                let detail = "\(next.day)  ·  \(next.timeZone)\n请先完成公司考勤打卡，再点击下方按钮。"
+                let counts = PunchSlot.allCases.map { slot in "\(slot.title)待确认 \(pending.filter { $0.slot == slot }.count) 项" }.joined(separator: " · ")
+                let footer = preview ? "演示不会生成确认记录。" : "本机确认不等于考勤提交。\n\(counts)"
+                showPanels(title: title, time: times.time(for: next.slot).text, detail: detail, footer: footer)
+                displayedID = identifier
+            }
             for panel in panels { panel.orderFrontRegardless() }
         }
         if !silent && (lastSound == nil || now.timeIntervalSince(lastSound!) >= 30) {
@@ -277,15 +289,30 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             lastSound = now
         }
         updateStatusTitle(calendar: calendar, now: now)
-        summaryItem?.title = preview ? "正在演示提醒" : "还有 \(pending.count) 项待确认"
+    }
+
+    private func pendingEvents(now: Date = Date(), calendar: Calendar = Schedule.calendar()) -> [ReminderEvent] {
+        state.map { Schedule.pending(state: $0, now: now, calendar: calendar, times: times) } ?? []
+    }
+
+    private func slotStatus(_ slot: PunchSlot, now: Date, calendar: Calendar) -> String {
+        guard let state = state, problem == nil else { return "提醒尚未启动" }
+        let day = Schedule.dayKey(now, calendar: calendar)
+        let pending = pendingEvents(now: now, calendar: calendar).filter { $0.slot == slot }.count
+        let count = state.confirmationCount(on: day, slot: slot)
+        let status: String
+        if pending > 0 { status = "待确认 \(pending) 项" }
+        else if state.confirmation(on: day, slot: slot, times: times) != nil { status = "本次已确认" }
+        else if (2...6).contains(calendar.component(.weekday, from: now)) { status = "未到时间" }
+        else { status = "周末不新增" }
+        return "\(status) · 今日已确认 \(count) 次"
     }
 
     private func updateStatusTitle(calendar: Calendar, now: Date) {
-        let day = Schedule.dayKey(now, calendar: calendar)
-        let count = PunchSlot.allCases.filter { state?.confirmation(on: day, slot: $0, times: times) != nil }.count
-        let weekday = (2...6).contains(calendar.component(.weekday, from: now))
-        scheduleItem?.title = "工作日 · \(times.morning.text) / \(times.evening.text)"
-        summaryItem?.title = weekday ? "今日已确认 \(count)/2" : "周末不产生新提醒"
+        for slot in PunchSlot.allCases {
+            slotItems[slot]?.title = "\(slot.title) \(times.time(for: slot).text)：\(slotStatus(slot, now: now, calendar: calendar))"
+        }
+        summaryItem?.title = preview ? "正在演示提醒" : "周一至周五 · Mac 本地时间"
         if let until = pausedUntil, until > now {
             let formatter = DateFormatter()
             formatter.dateFormat = "HH:mm"
@@ -293,7 +320,12 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         if problem != nil { summaryItem?.title = "提醒尚未启动，请打开设置处理" }
         resumeItem?.isEnabled = pausedUntil != nil && problem == nil
-        statusItem?.button?.toolTip = "打卡提醒 · \(summaryItem?.title ?? "") · \(times.morning.text) / \(times.evening.text)"
+        statusItem?.button?.toolTip = PunchSlot.allCases.compactMap { slotItems[$0]?.title }.joined(separator: "\n")
+        let copy = NSApp.mainMenu?.items.first?.submenu
+        for item in statusItem?.menu?.items ?? [] where item.tag >= 100 {
+            copy?.item(withTag: item.tag)?.title = item.title
+            copy?.item(withTag: item.tag)?.isEnabled = item.isEnabled
+        }
     }
 
     private func updateSettingsStatus(calendar: Calendar, now: Date) {
@@ -301,18 +333,13 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             settingsController?.showReminderStatus(problem == nil ? "演示模式，不写入正式确认。" : "提醒尚未启动，请处理下方提示。")
             return
         }
-        let day = Schedule.dayKey(now, calendar: calendar)
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "HH:mm"
-        let rows = PunchSlot.allCases.map { slot -> String in
-            if let confirmation = state.confirmation(on: day, slot: slot, times: times) {
-                return "\(slot.title)：今日 \(formatter.string(from: confirmation.confirmedAt)) 已确认"
-            }
-            if times.revision(on: day, for: slot) != nil { return "\(slot.title)：时间已重新设置，等待本次确认" }
-            return "\(slot.title)：今日未确认"
-        }
+        settingsController?.showSlotStatuses(Dictionary(uniqueKeysWithValues: PunchSlot.allCases.map { slot in
+            (slot, slotStatus(slot, now: now, calendar: calendar))
+        }))
         var detail: String
         var due = false
         if awaitingSetup {
@@ -322,13 +349,13 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         } else if let next = Schedule.nextEvent(state: state, now: now, calendar: calendar, times: times) {
             formatter.dateFormat = "MM/dd HH:mm"
             due = next.scheduledAt <= now
-            detail = due ? "已到\(next.slot.title)时间，关闭设置后显示确认窗口。" : "下次提醒（已保存）：\(formatter.string(from: next.scheduledAt)) · \(next.slot.title)"
+            detail = due ? "已到\(next.slot.title)时间，可从菜单栏进入对应确认窗口。" : "下次提醒（已保存）：\(formatter.string(from: next.scheduledAt)) · \(next.slot.title)"
             if due && preferences.sound == .silent { detail += " 当前音效为静音。" }
-            else if due { detail += " 提示音仍会每 30 秒响一次。" }
+            else if due { detail += " 每 30 秒播放提示音。" }
         } else {
             detail = "暂无待提醒项。"
         }
-        settingsController?.showReminderStatus((rows + [detail]).joined(separator: "\n"), due: due)
+        settingsController?.showReminderStatus(detail, due: due)
     }
 
     private func label(_ text: String, size: CGFloat, color: NSColor, weight: NSFont.Weight = .regular) -> NSTextField {
@@ -373,7 +400,8 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             let body = label(detail, size: 18 * scale, color: .secondaryLabelColor)
             let note = label(footer, size: 13 * scale, color: .secondaryLabelColor)
             let dragHint = label("拖动顶部可移开窗口", size: 12 * scale, color: .secondaryLabelColor)
-            let confirm = NSButton(title: "已打卡", target: self, action: #selector(confirmPunch))
+            let slot = event?.slot ?? .morning
+            let confirm = NSButton(title: slot == .morning ? "上班已打卡" : "下班已打卡", target: self, action: #selector(confirmPunch))
             Appearance.button(confirm, primary: true, symbol: "checkmark", large: true)
             if #available(macOS 26.0, *) { confirm.controlSize = .extraLarge }
             confirm.font = .systemFont(ofSize: 30 * scale, weight: .semibold)
@@ -385,7 +413,15 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             Appearance.button(pause, symbol: preview ? "xmark" : "pause", large: true)
             let settings = NSButton(title: "设置…", target: self, action: #selector(showSettings))
             Appearance.button(settings, symbol: "slider.horizontal.3")
-            let actions = NSStackView(views: [pause, settings])
+            var buttons = [pause, settings]
+            let other: PunchSlot = slot == .morning ? .evening : .morning
+            if pendingEvents().contains(where: { $0.slot == other }) {
+                let switchSlot = NSButton(title: "查看\(other.title)", target: self,
+                    action: other == .morning ? #selector(showMorning) : #selector(showEvening))
+                Appearance.button(switchSlot)
+                buttons.append(switchSlot)
+            }
+            let actions = NSStackView(views: buttons)
             actions.orientation = .horizontal
             actions.spacing = 12
             let stack = NSStackView(views: [icon, heading, clock, body, confirm, note, actions, dragHint])
@@ -417,7 +453,6 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private func closePanels() {
         for panel in panels { panel.orderOut(nil); panel.close() }
         panels.removeAll()
-        audio.stop()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { false }
@@ -478,23 +513,25 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         dialogOpen = false
     }
 
-    @objc private func showStatus() {
-        tick()
-        if !panels.isEmpty {
-            NSApp.activate(ignoringOtherApps: true)
-            panels.first?.makeKeyAndOrderFront(nil)
+    @objc private func showMorning() { showSlot(.morning) }
+    @objc private func showEvening() { showSlot(.evening) }
+
+    private func showSlot(_ slot: PunchSlot) {
+        let now = Date()
+        let calendar = Schedule.calendar()
+        let pending = pendingEvents(now: now, calendar: calendar)
+        if pending.contains(where: { $0.slot == slot }), problem == nil, !(pausedUntil.map { $0 > now } ?? false) {
+            presentation.select(slot, pending: pending)
+            settingsController?.hideForReminder()
+            displayedID = nil
+            tick()
             return
         }
-        let calendar = Schedule.calendar()
-        let day = Schedule.dayKey(Date(), calendar: calendar)
-        let rows = PunchSlot.allCases.map { slot -> String in
-            let confirmed = state?.confirmation(on: day, slot: slot, times: times) != nil
-            return "\(slot.title) \(times.time(for: slot).text)：\(confirmed ? "已确认" : "未确认")"
-        }
-        showAlert(title: "今日打卡确认", text: "\(day) · \(calendar.timeZone.identifier)\n\(rows.joined(separator: "\n"))\n仅周一至周五生成提醒。")
+        showSettings()
     }
 
     @objc private func showSettings() {
+        presentation.beginEditing(pending: pendingEvents())
         closePanels()
         displayedID = nil
         if settingsController == nil {
@@ -519,6 +556,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.awaitingSetup = false
+                    self.presentation.endEditing()
                     if self.settingsPreview { NSApp.terminate(nil) }
                     else { self.tick() }
                 }
@@ -564,7 +602,12 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showSettings()
+        if !pendingEvents().isEmpty && problem == nil && !awaitingSetup && !settingsPreview && !preview {
+            presentation.endEditing()
+            settingsController?.hideForReminder()
+            displayedID = nil
+            tick()
+        } else { showSettings() }
         return false
     }
 

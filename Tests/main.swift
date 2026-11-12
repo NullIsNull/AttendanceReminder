@@ -378,6 +378,75 @@ test("周末修改时间不生成周末打卡") {
     try expect(Schedule.pending(state: state, now: date("2026-11-15 23:00:00"), calendar: sg, times: saved.times).isEmpty, "周末改时间产生待办")
     try expect(Schedule.nextEvent(state: state, now: date("2026-11-14 12:00:00"), calendar: sg, times: saved.times)?.scheduledAt == date("2026-11-16 12:21:00"), "下个工作日时间错误")
 }
+test("设置打开时新到点提醒必须显示") {
+    var presentation = ReminderPresentation()
+    presentation.beginEditing(pending: [])
+    try expect(presentation.next(pending: []) == nil, "提前显示提醒")
+    let morning = Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg)[0]
+    try expect(presentation.next(pending: [morning]) == morning, "设置挡住新提醒")
+}
+test("处理已有提醒时可进入设置，新下班提醒仍会打断设置") {
+    var presentation = ReminderPresentation()
+    let events = Schedule.events(on: date("2026-11-12 20:00:00"), calendar: sg)
+    _ = presentation.next(pending: [events[0]])
+    presentation.beginEditing(pending: [events[0]])
+    try expect(presentation.next(pending: [events[0]]) == nil, "已有提醒阻止修改设置")
+    try expect(presentation.next(pending: events) == events[1], "上班待办吞掉下班提醒")
+}
+test("关闭设置恢复原有待确认提醒") {
+    var presentation = ReminderPresentation()
+    let morning = Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg)[0]
+    presentation.beginEditing(pending: [morning])
+    try expect(presentation.next(pending: [morning]) == nil, "设置没有暂时收起旧窗口")
+    presentation.endEditing()
+    try expect(presentation.next(pending: [morning]) == morning, "关闭设置未恢复")
+}
+test("两项同时待确认可独立选择下班，确认后仍提示上班") {
+    let storage = try store()
+    var state = initial("2026-11-12")
+    var presentation = ReminderPresentation()
+    let events = Schedule.events(on: date("2026-11-12 20:00:00"), calendar: sg)
+    presentation.select(.evening, pending: events)
+    try expect(presentation.next(pending: events) == events[1], "不能独立选择下班")
+    try storage.confirm(events[1], at: date("2026-11-12 20:01:00"), state: &state)
+    let pending = Schedule.pending(state: state, now: date("2026-11-12 20:02:00"), calendar: sg)
+    try expect(presentation.next(pending: pending) == events[0], "下班确认影响上班")
+    try expect(state.confirmationCount(on: "2026-11-12", slot: .morning) == 0 && state.confirmationCount(on: "2026-11-12", slot: .evening) == 1, "上下班统计混在一起")
+}
+test("上班未确认时下班到点切换为下班提醒") {
+    var presentation = ReminderPresentation()
+    let events = Schedule.events(on: date("2026-11-12 20:00:00"), calendar: sg)
+    try expect(presentation.next(pending: [events[0]]) == events[0], "上班未显示")
+    try expect(presentation.next(pending: events) == events[1], "下班没有独立弹出")
+    try expect(presentation.next(pending: events) == events[1], "每次刷新反复切换")
+}
+test("重设时间的新标记不会被已有设置编辑状态抑制") {
+    var presentation = ReminderPresentation()
+    var event = Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg)[0]
+    presentation.beginEditing(pending: [event])
+    _ = presentation.next(pending: [event])
+    event.revision = UUID().uuidString
+    try expect(presentation.next(pending: [event]) == event, "重设后仍当旧提醒收起")
+}
+test("上下班统计各自包含多次确认历史，不计入前一天") {
+    let storage = try store()
+    var state = initial("2026-11-11")
+    var morning = Schedule.events(on: date("2026-11-12 20:00:00"), calendar: sg)[0]
+    try storage.confirm(morning, at: date("2026-11-12 20:00:00"), state: &state)
+    morning.revision = UUID().uuidString
+    try storage.confirm(morning, at: date("2026-11-12 20:01:00"), state: &state)
+    let evening = Schedule.events(on: date("2026-11-12 20:00:00"), calendar: sg)[1]
+    try storage.confirm(evening, at: date("2026-11-12 20:02:00"), state: &state)
+    let yesterday = Schedule.events(on: date("2026-11-11 20:00:00"), calendar: sg)[0]
+    try storage.confirm(yesterday, at: date("2026-11-12 20:03:00"), state: &state)
+    try expect(state.confirmationCount(on: "2026-11-12", slot: .morning) == 2 && state.confirmationCount(on: "2026-11-12", slot: .evening) == 1, "历史统计串日期或时段")
+}
+test("重新打开后仍可选择历史下班待办") {
+    let events = Schedule.pending(state: initial("2026-11-11"), now: date("2026-11-12 20:00:00"), calendar: sg)
+    var presentation = ReminderPresentation()
+    presentation.select(.evening, pending: events)
+    try expect(presentation.next(pending: events)?.id == "2026-11-11/evening", "时段选择跳过历史下班")
+}
 test("音量从20%逐次升至100%") {
     var ramp = SoundRamp()
     let values = (0..<5).map { _ in ramp.nextVolume() }

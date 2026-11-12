@@ -84,9 +84,15 @@ if let command = command {
             // 状态查询只读取，避免占用常驻进程的写锁。
             let state = try store.loadOrCreate(now: Date(), calendar: Schedule.calendar())
             let effectiveTimes = timeArguments.isEmpty ? (try store.loadPreferences()?.times ?? times) : times
-            let count = Schedule.pending(state: state, now: Date(), calendar: Schedule.calendar(), times: effectiveTimes).count
+            let now = Date()
+            let calendar = Schedule.calendar()
+            let pending = Schedule.pending(state: state, now: now, calendar: calendar, times: effectiveTimes)
+            let day = Schedule.dayKey(now, calendar: calendar)
             print("本次查询时刻：\(effectiveTimes.morning.text) / \(effectiveTimes.evening.text)")
-            print("开始日期：\(state.firstDay)\n已确认：\(state.confirmations.count)\n待确认：\(count)\n记录：\(store.stateURL.path)")
+            for slot in PunchSlot.allCases {
+                print("\(slot.title)：今日已确认 \(state.confirmationCount(on: day, slot: slot)) 次，待确认 \(pending.filter { $0.slot == slot }.count) 项")
+            }
+            print("开始日期：\(state.firstDay)\n记录：\(store.stateURL.path)")
             if let until = try store.activePause(now: Date()) { print("紧急暂停至：\(until.ISO8601Format())") }
         } else {
             let lock = try InstanceLock(directory: directory)

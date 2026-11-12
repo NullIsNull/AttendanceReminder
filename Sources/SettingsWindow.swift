@@ -20,6 +20,10 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     private var issueCard: NSView?
     private let feedback = NSTextField(wrappingLabelWithString: "时间和声音将在保存后生效。")
     private let reminderStatus = NSTextField(wrappingLabelWithString: "")
+    private let morningStatus = NSTextField(wrappingLabelWithString: "")
+    private let eveningStatus = NSTextField(wrappingLabelWithString: "")
+    private let outputStatus = NSTextField(wrappingLabelWithString: "")
+    private var hasSuspendedDraft = false
     private let previewAudio = ReminderAudio()
     private var preferences = Preferences()
 
@@ -129,8 +133,16 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         }
         morning.setAccessibilityLabel("上班打卡时间")
         evening.setAccessibilityLabel("下班打卡时间")
-        let start = vertical([horizontal([Appearance.symbol("sun.max", size: 15), text("上班打卡", weight: .medium)], spacing: 7), morning], spacing: 10)
-        let end = vertical([horizontal([Appearance.symbol("moon", size: 15), text("下班打卡", weight: .medium)], spacing: 7), evening], spacing: 10)
+        for label in [morningStatus, eveningStatus] {
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+        }
+        morningStatus.setAccessibilityLabel("上班确认统计")
+        eveningStatus.setAccessibilityLabel("下班确认统计")
+        let start = vertical([horizontal([Appearance.symbol("sun.max", size: 15), text("上班打卡", weight: .medium)], spacing: 7), morning, morningStatus], spacing: 10)
+        let end = vertical([horizontal([Appearance.symbol("moon", size: 15), text("下班打卡", weight: .medium)], spacing: 7), evening, eveningStatus], spacing: 10)
+        morningStatus.widthAnchor.constraint(equalTo: start.widthAnchor).isActive = true
+        eveningStatus.widthAnchor.constraint(equalTo: end.widthAnchor).isActive = true
         let timeRow = horizontal([start, end], spacing: 28)
         timeRow.distribution = .fillEqually
         start.widthAnchor.constraint(equalTo: end.widthAnchor).isActive = true
@@ -164,7 +176,11 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         volumeText.translatesAutoresizingMaskIntoConstraints = false
         volumeText.widthAnchor.constraint(equalToConstant: 42).isActive = true
         let volumeRow = row("最大音量", horizontal([volume, volumeText], spacing: 8))
-        let soundRows = vertical([soundRow, rule(), rampRow, rule(), volumeRow], spacing: 14)
+        outputStatus.font = .systemFont(ofSize: 11)
+        outputStatus.textColor = .systemOrange
+        outputStatus.setAccessibilityLabel("系统声音状态")
+        outputStatus.isHidden = true
+        let soundRows = vertical([soundRow, rule(), rampRow, rule(), volumeRow, outputStatus], spacing: 14)
         for view in soundRows.arrangedSubviews { view.widthAnchor.constraint(equalTo: soundRows.widthAnchor).isActive = true }
         let soundCard = card(soundRows)
 
@@ -242,12 +258,23 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     }
 
     func show(preferences: Preferences) {
-        if window?.isVisible != true { load(preferences) }
+        if window?.isVisible != true && !hasSuspendedDraft { load(preferences) }
+        hasSuspendedDraft = false
         window?.level = .normal
         refreshStartup()
         showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func hideForReminder() {
+        if window?.isVisible == true { hasSuspendedDraft = true }
+        window?.orderOut(nil)
+    }
+
+    func showSlotStatuses(_ statuses: [PunchSlot: String]) {
+        morningStatus.stringValue = statuses[.morning] ?? ""
+        eveningStatus.stringValue = statuses[.evening] ?? ""
     }
 
     private func load(_ value: Preferences) {
@@ -277,6 +304,13 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     func showReminderStatus(_ message: String, due: Bool = false) {
         reminderStatus.stringValue = message
         reminderStatus.textColor = due ? .systemOrange : .secondaryLabelColor
+        refreshOutputStatus()
+    }
+
+    private func refreshOutputStatus() {
+        let warning = SystemAudioStatus.warning()
+        outputStatus.stringValue = warning ?? ""
+        outputStatus.isHidden = warning == nil
     }
 
     private func candidate() throws -> Preferences {
@@ -306,6 +340,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     @objc private func volumeChanged() { volumeText.stringValue = "\(Int(volume.doubleValue.rounded()))%" }
 
     @objc private func playPreview() {
+        refreshOutputStatus()
         previewAudio.stop()
         previewAudio.play(SoundChoice.allCases[sound.indexOfSelectedItem], volume: Float(volume.doubleValue / 100))
     }
@@ -354,5 +389,5 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { true }
     func windowDidBecomeKey(_ notification: Notification) { refreshStartup() }
-    func windowWillClose(_ notification: Notification) { previewAudio.stop(); onClose() }
+    func windowWillClose(_ notification: Notification) { hasSuspendedDraft = false; previewAudio.stop(); onClose() }
 }

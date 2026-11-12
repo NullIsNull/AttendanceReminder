@@ -148,6 +148,39 @@ struct ReminderEvent: Equatable {
     let timeZone: String
     var revision: String?
     var id: String { "\(day)/\(slot.rawValue)" }
+    var presentationID: String { "\(id)/\(revision ?? "initial")/\(timeZone)/\(scheduledAt.timeIntervalSince1970)" }
+}
+
+struct ReminderPresentation {
+    private var known: Set<String> = []
+    private var deferredWhileEditing: Set<String>?
+    private var selectedSlot: PunchSlot?
+
+    mutating func beginEditing(pending: [ReminderEvent]) {
+        deferredWhileEditing = Set(pending.map(\.presentationID))
+    }
+
+    mutating func endEditing() { deferredWhileEditing = nil }
+
+    mutating func select(_ slot: PunchSlot, pending: [ReminderEvent]) {
+        selectedSlot = slot
+        known = Set(pending.map(\.presentationID))
+        endEditing()
+    }
+
+    mutating func next(pending: [ReminderEvent]) -> ReminderEvent? {
+        let newlyDue = pending.first { !known.contains($0.presentationID) }
+        defer { known = Set(pending.map(\.presentationID)) }
+        if let deferred = deferredWhileEditing {
+            // Editing only defers reminders already due when Settings was opened.
+            guard let arrival = pending.first(where: { !deferred.contains($0.presentationID) }) else { return nil }
+            selectedSlot = arrival.slot
+            endEditing()
+        } else if !known.isEmpty, let arrival = newlyDue {
+            selectedSlot = arrival.slot
+        }
+        return pending.first { $0.slot == selectedSlot } ?? pending.first
+    }
 }
 
 struct Confirmation: Codable {
@@ -165,6 +198,10 @@ struct ReminderState: Codable {
     let createdAt: Date
     var confirmations: [String: Confirmation] = [:]
     var previousConfirmations: [Confirmation]?
+
+    func confirmationCount(on day: String, slot: PunchSlot) -> Int {
+        (Array(confirmations.values) + (previousConfirmations ?? [])).filter { $0.day == day && $0.slot == slot }.count
+    }
 
     func confirmation(on day: String, slot: PunchSlot, times: ReminderTimes) -> Confirmation? {
         guard let value = confirmations["\(day)/\(slot.rawValue)"],

@@ -6,7 +6,7 @@
 
 从 [Releases](https://github.com/NullIsNull/AttendanceReminder/releases/latest) 下载 DMG 安装包。
 
-1. 打开 `AttendanceReminder-2.1.2.dmg`。
+1. 打开 `AttendanceReminder-2.1.3.dmg`。
 2. 把 `AttendanceReminder` 拖入 `Applications`（应用程序）。
 3. 从“应用程序”打开，设置上下班时间、音效和最大音量，点击“保存设置”。
 4. 需要登录后自动运行时，开启“登录 Mac 时自动启动”。
@@ -25,6 +25,8 @@ macOS 26 及以上采用原生 Liquid Glass；较早系统使用磨砂材质。�
 - 每 30 秒提示一次，支持 5 种系统音效、内置铃声、静音、试听和最大音量；可逐次渐强。
 - 睡眠唤醒、重新打开后补出遗漏项；已确认项在重启后不重复；修改并保存某一时段的时间，会重新提醒该时段。
 - 暂停 15 分钟、立即恢复、紧急退出；登录启动使用 macOS 原生登录项。
+- 上班、下班分别统计确认次数和待办，可单独确认；设置打开时新到点仍自动弹窗。
+- 系统静音或音量为 0 时显示提示；试听与正式提醒互不打断。
 - 设置和确认记录保存在本机，不联网。
 
 **点击“已打卡”只保存本机确认，不会向公司考勤系统提交打卡。**
@@ -36,7 +38,7 @@ macOS 26 及以上采用原生 Liquid Glass；较早系统使用磨砂材质。�
 构建需要带 macOS 26 或更新 SDK 的 Apple Command Line Tools，运行仍支持 macOS 13 及以上。缺少工具时执行 `xcode-select --install`。在 macOS 终端运行：
 
 ```bash
-git clone --branch v2.1.2 git@github.com:NullIsNull/AttendanceReminder.git
+git clone --branch v2.1.3 git@github.com:NullIsNull/AttendanceReminder.git
 cd AttendanceReminder
 bash test.sh
 bash build.sh
@@ -45,6 +47,6 @@ bash Tests/integration.sh
 bash package-dmg.sh --no-build
 ```
 
-产物为 `dist/AttendanceReminder.app` 和 `dist/AttendanceReminder-2.1.2.dmg`。源码使用 GPL-3.0-only，完整许可证见 [LICENSE](LICENSE)。图标、脚本、文档和自带生成音效适用同一许可证；macOS 系统音效不包含在仓库中。
+产物为 `dist/AttendanceReminder.app` 和 `dist/AttendanceReminder-2.1.3.dmg`。源码使用 GPL-3.0-only，完整许可证见 [LICENSE](LICENSE)。图标、脚本、文档和自带生成音效适用同一许可证；macOS 系统音效不包含在仓库中。
 
 开发者仍可使用 `bash install.sh [上班时间] [下班时间] --prebuilt` 安装到 `~/Applications`，以及 `bash uninstall.sh` 卸载。脚本不自动修改登录启动；日常使用通过 DMG 和设置界面完成。
