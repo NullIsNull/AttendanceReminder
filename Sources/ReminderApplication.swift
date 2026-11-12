@@ -94,7 +94,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             }
             if instanceLock == nil { instanceLock = try InstanceLock(directory: directory) }
             state = try store?.loadOrCreate(now: Date(), calendar: Schedule.calendar())
-            try store?.savePreferences(preferences)
+            if let store = store { preferences = try store.savePreferences(preferences) }
             pausedUntil = try store?.activePause(now: Date())
             awaitingSetup = savedPreferences == nil
             problem = nil
@@ -282,7 +282,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func updateStatusTitle(calendar: Calendar, now: Date) {
         let day = Schedule.dayKey(now, calendar: calendar)
-        let count = PunchSlot.allCases.filter { state?.confirmations["\(day)/\($0.rawValue)"] != nil }.count
+        let count = PunchSlot.allCases.filter { state?.confirmation(on: day, slot: $0, times: times) != nil }.count
         let weekday = (2...6).contains(calendar.component(.weekday, from: now))
         scheduleItem?.title = "工作日 · \(times.morning.text) / \(times.evening.text)"
         summaryItem?.title = weekday ? "今日已确认 \(count)/2" : "周末不产生新提醒"
@@ -307,9 +307,10 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "HH:mm"
         let rows = PunchSlot.allCases.map { slot -> String in
-            if let confirmation = state.confirmations["\(day)/\(slot.rawValue)"] {
-                return "\(slot.title)：今日 \(formatter.string(from: confirmation.confirmedAt)) 已确认，不重复提醒"
+            if let confirmation = state.confirmation(on: day, slot: slot, times: times) {
+                return "\(slot.title)：今日 \(formatter.string(from: confirmation.confirmedAt)) 已确认"
             }
+            if times.revision(on: day, for: slot) != nil { return "\(slot.title)：时间已重新设置，等待本次确认" }
             return "\(slot.title)：今日未确认"
         }
         var detail: String
@@ -344,8 +345,9 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         closePanels()
         for screen in NSScreen.screens {
             let visible = screen.visibleFrame
-            let width = min(760, max(380, visible.width - 48))
-            let height = min(540, max(400, visible.height - 48))
+            let width = min(1400, visible.width - 32)
+            let height = min(900, visible.height - 32)
+            let scale = min(1, min(width / 1200, height / 800))
             let frame = NSRect(x: visible.midX - width / 2, y: visible.midY - height / 2, width: width, height: height)
             let panel = ReminderPanel(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
             panel.title = "打卡提醒"
@@ -364,17 +366,17 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             let surface = GlassSurface(frame: NSRect(origin: .zero, size: frame.size), radius: 32)
             panel.contentView = surface
             let host = surface.content
-            let icon = Appearance.symbol("clock.badge.checkmark", size: 32)
-            let heading = label(title, size: 21, color: .labelColor, weight: .semibold)
-            let clock = label(time, size: 86, color: .labelColor, weight: .light)
-            clock.font = .monospacedDigitSystemFont(ofSize: 86, weight: .light)
-            let body = label(detail, size: 15, color: .secondaryLabelColor)
-            let note = label(footer, size: 12, color: .secondaryLabelColor)
-            let dragHint = label("拖动顶部可移开窗口", size: 11, color: .secondaryLabelColor)
+            let icon = Appearance.symbol("clock.badge.checkmark", size: 52 * scale)
+            let heading = label(title, size: 44 * scale, color: .controlAccentColor, weight: .bold)
+            let clock = label(time, size: 150 * scale, color: .labelColor, weight: .medium)
+            clock.font = .monospacedDigitSystemFont(ofSize: 150 * scale, weight: .medium)
+            let body = label(detail, size: 18 * scale, color: .secondaryLabelColor)
+            let note = label(footer, size: 13 * scale, color: .secondaryLabelColor)
+            let dragHint = label("拖动顶部可移开窗口", size: 12 * scale, color: .secondaryLabelColor)
             let confirm = NSButton(title: "已打卡", target: self, action: #selector(confirmPunch))
             Appearance.button(confirm, primary: true, symbol: "checkmark", large: true)
             if #available(macOS 26.0, *) { confirm.controlSize = .extraLarge }
-            confirm.font = .systemFont(ofSize: 20, weight: .semibold)
+            confirm.font = .systemFont(ofSize: 30 * scale, weight: .semibold)
             confirm.translatesAutoresizingMaskIntoConstraints = false
             // A reminder must never consume another app's Return key as confirmation.
             confirm.keyEquivalent = ""
@@ -389,17 +391,20 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             let stack = NSStackView(views: [icon, heading, clock, body, confirm, note, actions, dragHint])
             stack.orientation = .vertical
             stack.alignment = .centerX
-            stack.spacing = 15
+            stack.spacing = 20 * scale
             stack.translatesAutoresizingMaskIntoConstraints = false
             host.addSubview(stack)
             NSLayoutConstraint.activate([
                 stack.centerXAnchor.constraint(equalTo: host.centerXAnchor),
                 stack.centerYAnchor.constraint(equalTo: host.centerYAnchor),
                 stack.widthAnchor.constraint(equalTo: host.widthAnchor, constant: -64),
+                stack.topAnchor.constraint(greaterThanOrEqualTo: host.topAnchor, constant: 24),
+                stack.bottomAnchor.constraint(lessThanOrEqualTo: host.bottomAnchor, constant: -24),
                 heading.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 body.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 note.widthAnchor.constraint(equalTo: stack.widthAnchor),
-                confirm.widthAnchor.constraint(equalToConstant: 250)
+                confirm.widthAnchor.constraint(equalToConstant: 420 * scale),
+                confirm.heightAnchor.constraint(equalToConstant: 80 * scale)
             ])
             panels.append(panel)
             panel.orderFrontRegardless()
@@ -483,7 +488,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         let calendar = Schedule.calendar()
         let day = Schedule.dayKey(Date(), calendar: calendar)
         let rows = PunchSlot.allCases.map { slot -> String in
-            let confirmed = state?.confirmations["\(day)/\(slot.rawValue)"] != nil
+            let confirmed = state?.confirmation(on: day, slot: slot, times: times) != nil
             return "\(slot.title) \(times.time(for: slot).text)：\(confirmed ? "已确认" : "未确认")"
         }
         showAlert(title: "今日打卡确认", text: "\(day) · \(calendar.timeZone.identifier)\n\(rows.joined(separator: "\n"))\n仅周一至周五生成提醒。")
@@ -495,14 +500,15 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         if settingsController == nil {
             settingsController = SettingsWindow(startup: startup, onSave: { [weak self] value in
                 guard let self = self else { return }
+                var saved = value
                 if !self.settingsPreview && !self.preview {
                     if self.instanceLock == nil { self.loadState() }
                     guard self.problem == nil, self.instanceLock != nil, let store = self.store else {
                         throw ReminderError.system(self.problem ?? "记录目录尚未就绪，请重试。")
                     }
-                    try store.savePreferences(value)
+                    saved = try store.savePreferences(value)
                 }
-                self.preferences = value
+                self.preferences = saved
                 self.awaitingSetup = false
                 self.event = nil
                 self.displayedID = nil

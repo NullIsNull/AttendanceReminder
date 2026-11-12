@@ -32,6 +32,7 @@ struct ClockTime: Equatable {
 struct ReminderTimes: Equatable {
     let morning: ClockTime
     let evening: ClockTime
+    var revisions: [String: String] = [:]
     static let defaults = try! ReminderTimes(arguments: [])
 
     init(arguments: [String]) throws {
@@ -44,6 +45,9 @@ struct ReminderTimes: Equatable {
     }
 
     func time(for slot: PunchSlot) -> ClockTime { slot == .morning ? morning : evening }
+    func revision(on day: String, for slot: PunchSlot) -> String? {
+        revisions["\(day)/\(slot.rawValue)"]
+    }
     var arguments: [String] { [morning.text, evening.text] }
 }
 
@@ -83,6 +87,7 @@ struct Preferences: Codable, Equatable {
     var sound: SoundChoice = .ping
     var increasingVolume = true
     var maximumVolume: Double = 1
+    var scheduleRevisions: [String: String]?
 
     func validated() throws -> Preferences {
         guard version == 1 else { throw ReminderError.system("设置版本不支持，请保留原文件并联系维护者。") }
@@ -90,13 +95,25 @@ struct Preferences: Codable, Equatable {
         guard maximumVolume.isFinite, (0.1...1).contains(maximumVolume) else {
             throw ReminderError.system("最大音量须在 10% 到 100% 之间。")
         }
+        for (key, revision) in scheduleRevisions ?? [:] {
+            let parts = key.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count == 2,
+                  Schedule.dayDate(String(parts[0]), calendar: Schedule.calendar()) != nil,
+                  PunchSlot(rawValue: String(parts[1])) != nil, UUID(uuidString: revision) != nil else {
+                throw ReminderError.system("重新提醒的设置记录无效，请保留原文件。")
+            }
+        }
         var result = self
         result.morning = times.morning.text
         result.evening = times.evening.text
         return result
     }
 
-    var times: ReminderTimes { try! ReminderTimes(arguments: [morning, evening]) }
+    var times: ReminderTimes {
+        var result = try! ReminderTimes(arguments: [morning, evening])
+        result.revisions = scheduleRevisions ?? [:]
+        return result
+    }
 }
 
 enum StartupStatus {
@@ -129,6 +146,7 @@ struct ReminderEvent: Equatable {
     let slot: PunchSlot
     let scheduledAt: Date
     let timeZone: String
+    var revision: String?
     var id: String { "\(day)/\(slot.rawValue)" }
 }
 
@@ -138,6 +156,7 @@ struct Confirmation: Codable {
     let scheduledAt: Date
     let confirmedAt: Date
     let timeZone: String
+    var revision: String?
 }
 
 struct ReminderState: Codable {
@@ -145,6 +164,13 @@ struct ReminderState: Codable {
     let firstDay: String
     let createdAt: Date
     var confirmations: [String: Confirmation] = [:]
+    var previousConfirmations: [Confirmation]?
+
+    func confirmation(on day: String, slot: PunchSlot, times: ReminderTimes) -> Confirmation? {
+        guard let value = confirmations["\(day)/\(slot.rawValue)"],
+              value.revision == times.revision(on: day, for: slot) else { return nil }
+        return value
+    }
 }
 
 struct EmergencyPause: Codable {
@@ -193,8 +219,9 @@ enum Schedule {
             let time = times.time(for: slot)
             guard let date = calendar.date(bySettingHour: time.hour, minute: time.minute,
                                            second: 0, of: day) else { return nil }
-            return ReminderEvent(day: dayKey(day, calendar: calendar), slot: slot,
-                                 scheduledAt: date, timeZone: calendar.timeZone.identifier)
+            let key = dayKey(day, calendar: calendar)
+            return ReminderEvent(day: key, slot: slot, scheduledAt: date, timeZone: calendar.timeZone.identifier,
+                                 revision: times.revision(on: key, for: slot))
         }
     }
 
@@ -204,7 +231,7 @@ enum Schedule {
         var result: [ReminderEvent] = []
         while day <= today {
             result += events(on: day, calendar: calendar, times: times).filter {
-                $0.scheduledAt <= now && state.confirmations[$0.id] == nil
+                $0.scheduledAt <= now && state.confirmation(on: $0.day, slot: $0.slot, times: times) == nil
             }
             guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { break }
             day = next
@@ -219,7 +246,7 @@ enum Schedule {
         var day = max(firstDay, calendar.startOfDay(for: now))
         while true {
             if let event = events(on: day, calendar: calendar, times: times).first(where: {
-                $0.scheduledAt >= now && state.confirmations[$0.id] == nil
+                $0.scheduledAt >= now && state.confirmation(on: $0.day, slot: $0.slot, times: times) == nil
             }) { return event }
             guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { return nil }
             day = next
@@ -279,6 +306,12 @@ final class StateStore {
                     throw ReminderError.invalidState("确认记录键不正确")
                 }
             }
+            for value in Array(state.confirmations.values) + (state.previousConfirmations ?? []) {
+                guard Schedule.dayDate(value.day, calendar: calendar) != nil,
+                      value.revision == nil || UUID(uuidString: value.revision!) != nil else {
+                    throw ReminderError.invalidState("确认记录的日期或重新提醒标记不正确")
+                }
+            }
             return state
         } catch {
             throw ReminderError.invalidState(error.localizedDescription)
@@ -286,10 +319,13 @@ final class StateStore {
     }
 
     func confirm(_ event: ReminderEvent, at now: Date, state: inout ReminderState) throws {
-        guard state.confirmations[event.id] == nil else { return }
+        if let existing = state.confirmations[event.id], existing.revision == event.revision { return }
         var candidate = state
+        if let existing = candidate.confirmations[event.id] {
+            candidate.previousConfirmations = (candidate.previousConfirmations ?? []) + [existing]
+        }
         candidate.confirmations[event.id] = Confirmation(day: event.day, slot: event.slot,
-            scheduledAt: event.scheduledAt, confirmedAt: now, timeZone: event.timeZone)
+            scheduledAt: event.scheduledAt, confirmedAt: now, timeZone: event.timeZone, revision: event.revision)
         // 写盘成功后才推进内存状态，否则窗口会把保存失败误当作已确认。
         try write(candidate, at: stateURL)
         state = candidate
@@ -316,8 +352,23 @@ final class StateStore {
         return try decode(Preferences.self, at: preferencesURL).validated()
     }
 
-    func savePreferences(_ preferences: Preferences) throws {
-        try write(preferences.validated(), at: preferencesURL)
+    @discardableResult
+    func savePreferences(_ preferences: Preferences, now: Date = Date(), calendar: Calendar = Schedule.calendar()) throws -> Preferences {
+        var candidate = try preferences.validated()
+        if let previous = try loadPreferences() {
+            var revisions = previous.scheduleRevisions ?? [:]
+            let day = Schedule.dayKey(now, calendar: calendar)
+            if candidate.morning != previous.morning {
+                revisions["\(day)/morning"] = UUID().uuidString
+            }
+            if candidate.evening != previous.evening {
+                revisions["\(day)/evening"] = UUID().uuidString
+            }
+            candidate.scheduleRevisions = revisions.isEmpty ? nil : revisions
+        }
+        // 时间与本次重新提醒标记一次写入，重启后不会丢失或重复重置。
+        try write(candidate, at: preferencesURL)
+        return candidate
     }
 }
 

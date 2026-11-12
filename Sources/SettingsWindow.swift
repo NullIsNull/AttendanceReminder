@@ -30,7 +30,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         self.onClose = onClose
         self.onMigration = onMigration
         self.onRetry = onRetry
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: min(680, (NSScreen.main?.visibleFrame.height ?? 800) - 60)),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: min(800, (NSScreen.main?.visibleFrame.height ?? 824) - 24)),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "AttendanceReminder 设置"
         window.titleVisibility = .hidden
@@ -79,8 +79,8 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     private func card(_ content: NSStackView) -> NSView {
         let box = NSBox()
         box.boxType = .custom
-        box.borderColor = .separatorColor
-        box.borderWidth = 0.5
+        box.borderColor = NSColor.labelColor.withAlphaComponent(0.28)
+        box.borderWidth = 1
         box.cornerRadius = 18
         box.fillColor = NSColor.controlBackgroundColor.withAlphaComponent(0.52)
         box.contentViewMargins = .zero
@@ -137,7 +137,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         reminderStatus.font = .systemFont(ofSize: 12)
         reminderStatus.textColor = .secondaryLabelColor
         reminderStatus.setAccessibilityLabel("今日确认与下次提醒")
-        let reminderNote = text("改时间不会重置今日确认。测试声音请点击下方“试听”。", size: 11, secondary: true)
+        let reminderNote = text("修改时间并保存后，该时段会重新提醒；未确认前每 30 秒响一次。", size: 11, secondary: true)
         let timeCard = card(vertical([timeRow, rule(), reminderStatus, reminderNote], spacing: 10))
         timeRow.widthAnchor.constraint(equalTo: timeCard.widthAnchor, constant: -36).isActive = true
         reminderStatus.widthAnchor.constraint(equalTo: timeRow.widthAnchor).isActive = true

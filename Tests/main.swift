@@ -231,27 +231,37 @@ test("自定义下班时间用于晚间提醒及跨天补提醒") {
     let nextDay = Schedule.pending(state: initial(), now: date("2026-11-10 08:00:00"), calendar: sg, times: times)
     try expect(before.count == 1 && at.count == 2 && nextDay == at, "自定义下班补提醒错误")
 }
-test("修改时刻不重复提醒同日已确认的时段") {
-    let storage = try store()
-    var state = initial()
-    let oldEvent = Schedule.pending(state: state, now: date("2026-11-09 10:00:00"), calendar: sg)[0]
-    try storage.confirm(oldEvent, at: date("2026-11-09 10:01:00"), state: &state)
-    let times = try ReminderTimes(arguments: ["10:10", "19:10"])
-    let reopened = try storage.loadOrCreate(now: date("2026-11-09 10:10:00"), calendar: sg)
-    try expect(Schedule.pending(state: reopened, now: date("2026-11-09 10:10:00"), calendar: sg, times: times).isEmpty, "修改时间导致重复确认")
-}
-test("12:20 改为12:21：已确认的上班跳过，下一次为下班") {
+test("12:20 保存12:21后，已确认的上班重新提醒") {
     let storage = try store()
     var state = initial("2026-11-12")
-    let morning = Schedule.pending(state: state, now: date("2026-11-12 10:03:14"), calendar: sg)[0]
+    try storage.savePreferences(Preferences())
+    let morning = Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg)[0]
     try storage.confirm(morning, at: date("2026-11-12 10:03:14"), state: &state)
-    let times = try ReminderTimes(arguments: ["12:21", "19:10"])
-    for now in ["2026-11-12 12:20:00", "2026-11-12 12:21:00"] {
-        let next = Schedule.nextEvent(state: state, now: date(now), calendar: sg, times: times)
-        try expect(next?.slot == .evening && next?.scheduledAt == date("2026-11-12 19:10:00"), "错误提示已确认上班还会响")
+    var changed = Preferences(); changed.morning = "12:21"
+    let saved = try storage.savePreferences(changed, now: date("2026-11-12 12:20:00"), calendar: sg)
+    let before = Schedule.pending(state: state, now: date("2026-11-12 12:20:59"), calendar: sg, times: saved.times)
+    let pending = Schedule.pending(state: state, now: date("2026-11-12 12:21:00"), calendar: sg, times: saved.times)
+    try expect(before.isEmpty && pending.count == 1 && pending[0].slot == .morning, "修改后未按新时间提醒")
+    let next = Schedule.nextEvent(state: state, now: date("2026-11-12 12:20:00"), calendar: sg, times: saved.times)
+    try expect(next == pending[0], "下次提醒没有指向新上班时间")
+    try storage.confirm(pending[0], at: date("2026-11-12 12:22:00"), state: &state)
+    let reopened = try storage.loadOrCreate(now: date("2026-11-12 12:23:00"), calendar: sg)
+    let reloaded = try storage.loadPreferences()!
+    try expect(Schedule.pending(state: reopened, now: date("2026-11-12 12:23:00"), calendar: sg, times: reloaded.times).isEmpty, "再次确认后重启重复")
+    try expect(reopened.previousConfirmations?.first?.confirmedAt == date("2026-11-12 10:03:14"), "旧确认丢失")
+}
+test("只改下班时间，已确认的上班不受影响") {
+    let storage = try store()
+    var state = initial("2026-11-12")
+    try storage.savePreferences(Preferences())
+    for event in Schedule.events(on: date("2026-11-12 20:00:00"), calendar: sg) {
+        try storage.confirm(event, at: date("2026-11-12 20:00:00"), state: &state)
     }
-    let nextDay = Schedule.pending(state: state, now: date("2026-11-13 12:21:00"), calendar: sg, times: times)
-    try expect(nextDay.contains { $0.id == "2026-11-13/morning" }, "新时间次日未生效")
+    var changed = Preferences(); changed.evening = "20:10"
+    let saved = try storage.savePreferences(changed, now: date("2026-11-12 20:01:00"), calendar: sg)
+    let pending = Schedule.pending(state: state, now: date("2026-11-12 20:10:00"), calendar: sg, times: saved.times)
+    try expect(pending.count == 1 && pending[0].slot == .evening, "下班修改影响上班确认")
+    try expect(state.confirmation(on: "2026-11-12", slot: .morning, times: saved.times) != nil, "上班确认状态错误")
 }
 test("未确认时12:21到点进入待办") {
     let state = initial("2026-11-12")
@@ -273,6 +283,100 @@ test("下次提醒跳过已确认和周末") {
 test("下次提醒优先显示历史待办") {
     let next = Schedule.nextEvent(state: initial("2026-11-12"), now: date("2026-11-13 09:00:00"), calendar: sg)
     try expect(next?.scheduledAt == date("2026-11-12 10:00:00"), "历史待办被下次提醒忽略")
+}
+test("多次改回原时间也生成新的提醒") {
+    let storage = try store()
+    var state = initial("2026-11-12")
+    var saved = try storage.savePreferences(Preferences())
+    let first = Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg, times: saved.times)[0]
+    try storage.confirm(first, at: date("2026-11-12 10:01:00"), state: &state)
+    for time in ["11:00", "10:00", "12:00", "10:00"] {
+        saved.morning = time
+        saved = try storage.savePreferences(saved, now: date("2026-11-12 12:20:00"), calendar: sg)
+        let pending = Schedule.pending(state: state, now: date("2026-11-12 12:20:00"), calendar: sg, times: saved.times)
+        try expect(pending.count == 1, "改回原时间没有重新提醒")
+        try storage.confirm(pending[0], at: date("2026-11-12 12:20:00"), state: &state)
+        try storage.confirm(pending[0], at: date("2026-11-12 12:20:01"), state: &state)
+    }
+    try expect(state.previousConfirmations?.count == 4, "多次确认丢失，或重复点击增加了历史")
+}
+test("未确认时连续改时间只提醒最后保存的时间") {
+    let storage = try store()
+    var saved = try storage.savePreferences(Preferences())
+    var state = initial("2026-11-12")
+    try storage.confirm(Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg)[0], at: date("2026-11-12 10:01:00"), state: &state)
+    for time in ["12:21", "10:00", "12:22"] {
+        saved.morning = time
+        saved = try storage.savePreferences(saved, now: date("2026-11-12 12:20:00"), calendar: sg)
+    }
+    try expect(Schedule.pending(state: state, now: date("2026-11-12 12:21:00"), calendar: sg, times: saved.times).isEmpty, "仍按被替换的时间提醒")
+    try expect(Schedule.pending(state: state, now: date("2026-11-12 12:22:00"), calendar: sg, times: saved.times).count == 1, "最后一次保存没生效")
+}
+test("相同时间、音效和音量保存不重新触发") {
+    let storage = try store()
+    var saved = try storage.savePreferences(Preferences())
+    saved.morning = "12:21"
+    saved = try storage.savePreferences(saved, now: date("2026-11-12 12:20:00"), calendar: sg)
+    var state = initial("2026-11-12")
+    let event = Schedule.pending(state: state, now: date("2026-11-12 12:21:00"), calendar: sg, times: saved.times)[0]
+    try storage.confirm(event, at: date("2026-11-12 12:21:00"), state: &state)
+    let revision = saved.scheduleRevisions
+    saved.morning = "12：21"; saved.sound = .glass; saved.maximumVolume = 0.7; saved.increasingVolume = false
+    saved = try storage.savePreferences(saved, now: date("2026-11-12 12:22:00"), calendar: sg)
+    try expect(saved.scheduleRevisions == revision, "无时间变化却重新触发")
+    try expect(Schedule.pending(state: state, now: date("2026-11-12 12:22:00"), calendar: sg, times: saved.times).isEmpty, "音效修改重复提醒")
+}
+test("重设后未确认，重新启动仍会按新时间提醒") {
+    let storage = try store()
+    try storage.savePreferences(Preferences())
+    var state = initial("2026-11-12")
+    try storage.confirm(Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg)[0], at: date("2026-11-12 10:01:00"), state: &state)
+    var value = Preferences(); value.morning = "12:21"
+    let saved = try storage.savePreferences(value, now: date("2026-11-12 12:20:00"), calendar: sg)
+    let secondStore = try StateStore(directory: storage.directory)
+    let reopened = try secondStore.loadOrCreate(now: date("2026-11-12 12:20:30"), calendar: sg)
+    let reloaded = try secondStore.savePreferences(secondStore.loadPreferences()!, now: date("2026-11-12 12:20:30"), calendar: sg)
+    try expect(reloaded == saved, "启动重新生成了提醒标记")
+    try expect(Schedule.pending(state: reopened, now: date("2026-11-12 12:21:00"), calendar: sg, times: reloaded.times).count == 1, "重启丢失重设提醒")
+}
+test("跨天改时间保留历史重设待办和已确认记录") {
+    let storage = try store()
+    var saved = try storage.savePreferences(Preferences())
+    var state = initial("2026-11-12")
+    for event in Schedule.events(on: date("2026-11-12 20:00:00"), calendar: sg) {
+        try storage.confirm(event, at: date("2026-11-12 20:00:00"), state: &state)
+    }
+    saved.morning = "12:21"
+    saved = try storage.savePreferences(saved, now: date("2026-11-12 20:01:00"), calendar: sg)
+    saved.morning = "12:22"
+    saved = try storage.savePreferences(saved, now: date("2026-11-13 09:00:00"), calendar: sg)
+    var pending = Schedule.pending(state: state, now: date("2026-11-13 09:00:00"), calendar: sg, times: saved.times)
+    try expect(pending.count == 1 && pending[0].day == "2026-11-12", "跨天修改丢失昨日重设待办")
+    try storage.confirm(pending[0], at: date("2026-11-13 09:00:00"), state: &state)
+    saved.morning = "12:23"
+    saved = try storage.savePreferences(saved, now: date("2026-11-13 09:01:00"), calendar: sg)
+    pending = Schedule.pending(state: state, now: date("2026-11-13 09:01:00"), calendar: sg, times: saved.times)
+    try expect(pending.isEmpty, "今日修改重新打开了昨日已确认项")
+}
+test("同时修改两项时间分别重新提醒") {
+    let storage = try store()
+    try storage.savePreferences(Preferences())
+    var state = initial("2026-11-12")
+    for event in Schedule.events(on: date("2026-11-12 20:00:00"), calendar: sg) {
+        try storage.confirm(event, at: date("2026-11-12 20:00:00"), state: &state)
+    }
+    var value = Preferences(); value.morning = "12:21"; value.evening = "19:11"
+    let saved = try storage.savePreferences(value, now: date("2026-11-12 20:01:00"), calendar: sg)
+    try expect(Schedule.pending(state: state, now: date("2026-11-12 20:01:00"), calendar: sg, times: saved.times).count == 2, "同时修改未重新产生两项")
+}
+test("周末修改时间不生成周末打卡") {
+    let storage = try store()
+    try storage.savePreferences(Preferences())
+    var value = Preferences(); value.morning = "12:21"
+    let saved = try storage.savePreferences(value, now: date("2026-11-14 12:00:00"), calendar: sg)
+    let state = initial("2026-11-14")
+    try expect(Schedule.pending(state: state, now: date("2026-11-15 23:00:00"), calendar: sg, times: saved.times).isEmpty, "周末改时间产生待办")
+    try expect(Schedule.nextEvent(state: state, now: date("2026-11-14 12:00:00"), calendar: sg, times: saved.times)?.scheduledAt == date("2026-11-16 12:21:00"), "下个工作日时间错误")
 }
 test("音量从20%逐次升至100%") {
     var ramp = SoundRamp()
@@ -360,6 +464,39 @@ test("设置写入失败可重试且不伪装保存成功") {
     var rejected = false
     do { try storage.savePreferences(Preferences()) } catch { rejected = true }
     try expect(rejected, "写入失败未报错")
+}
+test("重新设置写盘失败不改变生效时间或旧确认") {
+    let storage = try store()
+    try storage.savePreferences(Preferences())
+    var state = initial("2026-11-12")
+    try storage.confirm(Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg)[0], at: date("2026-11-12 10:01:00"), state: &state)
+    let prefsBefore = try Data(contentsOf: storage.preferencesURL)
+    let stateBefore = try Data(contentsOf: storage.stateURL)
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: storage.directory.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storage.directory.path) }
+    var value = Preferences(); value.morning = "12:21"
+    var rejected = false
+    do { try storage.savePreferences(value, now: date("2026-11-12 12:20:00"), calendar: sg) } catch { rejected = true }
+    let prefsAfter = try Data(contentsOf: storage.preferencesURL)
+    let stateAfter = try Data(contentsOf: storage.stateURL)
+    try expect(rejected && prefsAfter == prefsBefore && stateAfter == stateBefore, "保存失败改变了调度或确认")
+}
+test("再次确认写盘失败不归档或覆盖旧确认") {
+    let storage = try store()
+    try storage.savePreferences(Preferences())
+    var state = initial("2026-11-12")
+    try storage.confirm(Schedule.events(on: date("2026-11-12 10:00:00"), calendar: sg)[0], at: date("2026-11-12 10:01:00"), state: &state)
+    var value = Preferences(); value.morning = "12:21"
+    let saved = try storage.savePreferences(value, now: date("2026-11-12 12:20:00"), calendar: sg)
+    let event = Schedule.pending(state: state, now: date("2026-11-12 12:21:00"), calendar: sg, times: saved.times)[0]
+    let before = try Data(contentsOf: storage.stateURL)
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: storage.directory.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storage.directory.path) }
+    var rejected = false
+    do { try storage.confirm(event, at: date("2026-11-12 12:21:00"), state: &state) } catch { rejected = true }
+    let after = try Data(contentsOf: storage.stateURL)
+    try expect(rejected && before == after && state.previousConfirmations == nil, "失败却推进了历史确认")
+    try expect(state.confirmation(on: event.day, slot: event.slot, times: saved.times) == nil, "失败却完成了新提醒")
 }
 test("所有音效含静音可往返保存") {
     let storage = try store()
