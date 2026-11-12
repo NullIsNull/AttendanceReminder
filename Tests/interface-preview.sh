@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-only
 set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "$0")/.." && pwd)"
-[[ $# -ge 2 && "$1" == /* ]] || { echo 'Usage: bash Tests/interface-preview.sh /absolute/output-directory settings|conflict|reminder [dark]' >&2; exit 2; }
+[[ $# -ge 2 && "$1" == /* ]] || { echo 'Usage: bash Tests/interface-preview.sh /absolute/output-directory settings|conflict|reminder|due|confirmed [dark]' >&2; exit 2; }
 output="$1"
 mode="$2"
-case "$mode" in settings|conflict|reminder) ;; *) exit 2 ;; esac
+case "$mode" in settings|conflict|reminder|due|confirmed) ;; *) exit 2 ;; esac
 mkdir -p "$output"
 app="$output/AttendancePreview-$mode.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"

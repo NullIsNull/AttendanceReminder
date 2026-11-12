@@ -211,6 +211,20 @@ enum Schedule {
         }
         return result
     }
+
+    static func nextEvent(state: ReminderState, now: Date, calendar: Calendar,
+                          times: ReminderTimes = .defaults) -> ReminderEvent? {
+        if let overdue = pending(state: state, now: now, calendar: calendar, times: times).first { return overdue }
+        guard let firstDay = dayDate(state.firstDay, calendar: calendar) else { return nil }
+        var day = max(firstDay, calendar.startOfDay(for: now))
+        while true {
+            if let event = events(on: day, calendar: calendar, times: times).first(where: {
+                $0.scheduledAt >= now && state.confirmations[$0.id] == nil
+            }) { return event }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { return nil }
+            day = next
+        }
+    }
 }
 
 final class StateStore {

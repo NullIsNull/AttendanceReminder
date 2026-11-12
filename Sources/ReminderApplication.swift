@@ -37,10 +37,11 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private var problem: String?
     private var dialogOpen = false
     private var previewFinished = false
-    private let audio = ReminderAudio()
+    private let audio: ReminderSoundPlaying
     private var soundRamp = SoundRamp()
 
-    init(directory: URL, preview: Bool, silent: Bool, autoExit: TimeInterval?, times: ReminderTimes?, settingsPreview: Bool, openSettingsAtLaunch: Bool, startup: LoginStartup? = nil) {
+    init(directory: URL, preview: Bool, silent: Bool, autoExit: TimeInterval?, times: ReminderTimes?, settingsPreview: Bool, openSettingsAtLaunch: Bool, startup: LoginStartup? = nil,
+         audio: ReminderSoundPlaying = ReminderAudio()) {
         self.directory = directory
         self.preview = preview
         self.silent = silent
@@ -48,6 +49,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         self.initialTimes = times
         self.settingsPreview = settingsPreview
         self.openSettingsAtLaunch = openSettingsAtLaunch
+        self.audio = audio
         self.startup = startup ?? LoginStartup(preview: preview || settingsPreview)
     }
 
@@ -133,9 +135,6 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         settings.image = Appearance.menuIcon("slider.horizontal.3")
         menu.addItem(settings)
         addMenuItem("显示提醒 / 今日状态", action: #selector(showStatus), to: menu)
-        addMenuItem("演示提醒（不写记录）", action: #selector(startPreview), to: menu)
-        addMenuItem("使用说明", action: #selector(openGuide), to: menu)
-        addMenuItem("打开确认记录文件夹", action: #selector(openRecords), to: menu)
         menu.addItem(.separator())
         addMenuItem("暂停 15 分钟", action: #selector(pauseReminders), to: menu)
         resumeItem = NSMenuItem(title: "立即恢复提醒", action: #selector(resumeReminders), keyEquivalent: "")
@@ -181,8 +180,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private func addMenuItem(_ title: String, action: Selector, to menu: NSMenu) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
-        let symbols = ["显示提醒 / 今日状态": "checkmark.circle", "演示提醒（不写记录）": "play.rectangle",
-                       "使用说明": "questionmark.circle", "打开确认记录文件夹": "folder", "暂停 15 分钟": "pause.circle"]
+        let symbols = ["显示提醒 / 今日状态": "checkmark.circle", "暂停 15 分钟": "pause.circle"]
         if let symbol = symbols[title] { item.image = Appearance.menuIcon(symbol) }
         menu.addItem(item)
     }
@@ -221,10 +219,8 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         guard !dialogOpen, !previewFinished else { return }
         let now = Date()
         let calendar = Schedule.calendar()
-        if settingsController?.window?.isVisible == true {
-            // Editing must not compete with reminder windows or their activation timer.
-            return
-        }
+        let editing = settingsController?.window?.isVisible == true
+        if editing { updateSettingsStatus(calendar: calendar, now: now) }
         if settingsPreview || awaitingSetup { return }
         if let until = pausedUntil, until > now {
             closePanels()
@@ -264,7 +260,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         event = next
         let identifier = "\(next.id)/\(next.timeZone)/\(pending.count)"
-        if displayedID != identifier {
+        if !editing && displayedID != identifier {
             let missed = next.day != Schedule.dayKey(now, calendar: calendar) ? "历史补提醒 · " : ""
             let title = preview ? "提醒演示 · 上班打卡" : "\(missed)\(next.slot.title)"
             let detail = "\(next.day)  ·  \(next.timeZone)\n请先完成公司考勤打卡，再点击下方按钮。"
@@ -272,7 +268,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             showPanels(title: title, time: times.time(for: next.slot).text, detail: detail, footer: footer)
             displayedID = identifier
         }
-        if !dialogOpen {
+        if !editing && !dialogOpen {
             for panel in panels { panel.orderFrontRegardless() }
         }
         if !silent && (lastSound == nil || now.timeIntervalSince(lastSound!) >= 30) {
@@ -298,6 +294,40 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         if problem != nil { summaryItem?.title = "提醒尚未启动，请打开设置处理" }
         resumeItem?.isEnabled = pausedUntil != nil && problem == nil
         statusItem?.button?.toolTip = "打卡提醒 · \(summaryItem?.title ?? "") · \(times.morning.text) / \(times.evening.text)"
+    }
+
+    private func updateSettingsStatus(calendar: Calendar, now: Date) {
+        guard !settingsPreview, !preview, let state = state, problem == nil else {
+            settingsController?.showReminderStatus(problem == nil ? "演示模式，不写入正式确认。" : "提醒尚未启动，请处理下方提示。")
+            return
+        }
+        let day = Schedule.dayKey(now, calendar: calendar)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "HH:mm"
+        let rows = PunchSlot.allCases.map { slot -> String in
+            if let confirmation = state.confirmations["\(day)/\(slot.rawValue)"] {
+                return "\(slot.title)：今日 \(formatter.string(from: confirmation.confirmedAt)) 已确认，不重复提醒"
+            }
+            return "\(slot.title)：今日未确认"
+        }
+        var detail: String
+        var due = false
+        if awaitingSetup {
+            detail = "保存设置后开始提醒。"
+        } else if let until = pausedUntil, until > now {
+            detail = "已暂停，\(formatter.string(from: until)) 恢复。"
+        } else if let next = Schedule.nextEvent(state: state, now: now, calendar: calendar, times: times) {
+            formatter.dateFormat = "MM/dd HH:mm"
+            due = next.scheduledAt <= now
+            detail = due ? "已到\(next.slot.title)时间，关闭设置后显示确认窗口。" : "下次提醒（已保存）：\(formatter.string(from: next.scheduledAt)) · \(next.slot.title)"
+            if due && preferences.sound == .silent { detail += " 当前音效为静音。" }
+            else if due { detail += " 提示音仍会每 30 秒响一次。" }
+        } else {
+            detail = "暂无待提醒项。"
+        }
+        settingsController?.showReminderStatus((rows + [detail]).joined(separator: "\n"), due: due)
     }
 
     private func label(_ text: String, size: CGFloat, color: NSColor, weight: NSFont.Weight = .regular) -> NSTextField {
@@ -459,19 +489,9 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         showAlert(title: "今日打卡确认", text: "\(day) · \(calendar.timeZone.identifier)\n\(rows.joined(separator: "\n"))\n仅周一至周五生成提醒。")
     }
 
-    @objc private func startPreview() {
-        guard let executable = Bundle.main.executableURL else { return }
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = times.arguments + ["--preview", "--state-dir", directory.path]
-        do { try process.run() } catch { showAlert(title: "无法启动演示", text: error.localizedDescription) }
-    }
-
     @objc private func showSettings() {
         closePanels()
         displayedID = nil
-        lastSound = nil
-        soundRamp.reset()
         if settingsController == nil {
             settingsController = SettingsWindow(startup: startup, onSave: { [weak self] value in
                 guard let self = self else { return }
@@ -508,6 +528,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             }, onRetry: { [weak self] in self?.retryLoading() })
         }
         settingsController?.showIssue(problem)
+        updateSettingsStatus(calendar: Schedule.calendar(), now: Date())
         settingsController?.show(preferences: preferences)
     }
 
@@ -536,19 +557,9 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         } catch { showAlert(title: "恢复失败", text: error.localizedDescription) }
     }
 
-    @objc private func openGuide() {
-        if let url = Bundle.main.url(forResource: "使用说明", withExtension: "md", subdirectory: "Support/docs") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showSettings()
         return false
-    }
-
-    @objc private func openRecords() {
-        NSWorkspace.shared.open(directory)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

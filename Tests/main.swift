@@ -240,6 +240,40 @@ test("修改时刻不重复提醒同日已确认的时段") {
     let reopened = try storage.loadOrCreate(now: date("2026-11-09 10:10:00"), calendar: sg)
     try expect(Schedule.pending(state: reopened, now: date("2026-11-09 10:10:00"), calendar: sg, times: times).isEmpty, "修改时间导致重复确认")
 }
+test("12:20 改为12:21：已确认的上班跳过，下一次为下班") {
+    let storage = try store()
+    var state = initial("2026-11-12")
+    let morning = Schedule.pending(state: state, now: date("2026-11-12 10:03:14"), calendar: sg)[0]
+    try storage.confirm(morning, at: date("2026-11-12 10:03:14"), state: &state)
+    let times = try ReminderTimes(arguments: ["12:21", "19:10"])
+    for now in ["2026-11-12 12:20:00", "2026-11-12 12:21:00"] {
+        let next = Schedule.nextEvent(state: state, now: date(now), calendar: sg, times: times)
+        try expect(next?.slot == .evening && next?.scheduledAt == date("2026-11-12 19:10:00"), "错误提示已确认上班还会响")
+    }
+    let nextDay = Schedule.pending(state: state, now: date("2026-11-13 12:21:00"), calendar: sg, times: times)
+    try expect(nextDay.contains { $0.id == "2026-11-13/morning" }, "新时间次日未生效")
+}
+test("未确认时12:21到点进入待办") {
+    let state = initial("2026-11-12")
+    let times = try ReminderTimes(arguments: ["12:21", "19:10"])
+    let next = Schedule.nextEvent(state: state, now: date("2026-11-12 12:20:00"), calendar: sg, times: times)
+    try expect(next?.scheduledAt == date("2026-11-12 12:21:00"), "下次提醒时间错误")
+    let pending = Schedule.pending(state: state, now: date("2026-11-12 12:21:00"), calendar: sg, times: times)
+    try expect(pending.first == next, "到点未触发")
+}
+test("下次提醒跳过已确认和周末") {
+    let storage = try store()
+    var state = initial("2026-11-13")
+    for event in Schedule.events(on: date("2026-11-13 00:00:00"), calendar: sg) {
+        try storage.confirm(event, at: date("2026-11-13 20:00:00"), state: &state)
+    }
+    let next = Schedule.nextEvent(state: state, now: date("2026-11-13 20:00:00"), calendar: sg)
+    try expect(next?.scheduledAt == date("2026-11-16 10:00:00"), "周末产生新提醒")
+}
+test("下次提醒优先显示历史待办") {
+    let next = Schedule.nextEvent(state: initial("2026-11-12"), now: date("2026-11-13 09:00:00"), calendar: sg)
+    try expect(next?.scheduledAt == date("2026-11-12 10:00:00"), "历史待办被下次提醒忽略")
+}
 test("音量从20%逐次升至100%") {
     var ramp = SoundRamp()
     let values = (0..<5).map { _ in ramp.nextVolume() }

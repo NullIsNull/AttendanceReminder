@@ -1,6 +1,6 @@
 # 验证记录
 
-版本：2.1.0。日期：2026-11-12，Asia/Singapore。环境：Apple Silicon、macOS 27.2（26B123）、Apple Swift 6.4.2、Command Line Tools。
+版本：2.1.1。日期：2026-11-12，Asia/Singapore。环境：Apple Silicon、macOS 27.2（26B123）、Apple Swift 6.4.2、Command Line Tools。
 
 ## 编译与自动检查
 
@@ -8,7 +8,7 @@
 | --- | --- |
 | 原生编译 | arm64、x86_64 均成功，Universal 2，最低运行目标 macOS 13 |
 | 本地签名 | codesign 严格验证通过，隔离安装副本也通过 |
-| 核心逻辑 | 49 项测试通过，0 项失败 |
+| 核心逻辑 | 53 项测试通过，0 项失败 |
 | 命令行 | 默认、单参数、双参数、中文冒号、非法参数拒绝且不写状态通过 |
 | 隔离安装与卸载 | 更新保留设置和确认记录，默认卸载保留数据，重装沿用，清除模式删除测试数据 |
 | Intel 指令执行 | Rosetta 下 x86_64 命令输出 10:10 / 19:10 |
@@ -16,7 +16,18 @@
 
 核心测试覆盖调度边界、工作日和周末、唤醒补提醒计算、跨天遗漏、确认持久化和去重、时区与夏令时、损坏文件、写入失败、锁、暂停、音量渐强及设置持久化。
 
-## 本机界面回归
+## 2.1.1 提醒回归
+
+- 复现今日上班已确认后在 12:20 改为 12:21：12:21 不重复，下一项为下班；次日上班按新时间生成。
+- 独立 `due` 测试在设置窗口打开时到点，12:33:04、12:33:39、12:34:09 触发 Ping 播放调用，音量依次为 6%、12%、18%；此时提醒窗口数为 0。这是调度和播放调用验证，未测量扬声器实际输出。
+- 关闭设置后，两台显示器恢复 2 个提醒窗口。
+- 独立 `confirmed` 测试显示今日上班已确认、下一次为下班；经过保存的上班时间后，播放次数和提醒窗口数仍为 0。
+- 设置页面已显示今日两次确认、已保存设置的下次提醒及到点提示。
+- 已打开精简后的菜单，确认只保留设置、今日状态、暂停、恢复和紧急退出，三项辅助菜单已移除。
+
+## 2.1.0 已有界面回归
+
+以下为前一版本的实测记录。
 
 使用 `Tests/interface-preview.sh` 构建独立测试应用。它运行实际设置和提醒代码，使用隔离状态目录，禁用系统登录项变更。测试应用记录窗口可见状态，避免界面检查工具重新激活应用时把重新打开误判为关闭失败。
 
@@ -44,9 +55,11 @@ bash package-dmg.sh --no-build
 bash Tests/interface-preview.sh /absolute/test-directory settings
 bash Tests/interface-preview.sh /absolute/test-directory conflict
 bash Tests/interface-preview.sh /absolute/test-directory reminder dark
+bash Tests/interface-preview.sh /absolute/test-directory due
+bash Tests/interface-preview.sh /absolute/test-directory confirmed
 ```
 
-界面测试程序不随正式应用分发。`conflict` 模式故意保持文件锁占用，用于验证错误后的交互；最多运行 5 分钟。其状态目录内记录及同级 `status-*.json` 均为测试数据。
+界面测试程序不随正式应用分发。`conflict` 模式故意保持文件锁占用，用于验证错误后的交互；最多运行 5 分钟。`due` 和 `confirmed` 在工作日 23:00 前运行，首次启动时把上班设为下一分钟，分别创建未确认与已确认样本。其状态目录内记录及同级 `status-*.json` 均为测试数据；状态文件包含窗口数量和声音调用记录。
 
 ## 验证边界
 

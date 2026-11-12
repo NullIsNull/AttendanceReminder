@@ -19,6 +19,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     private let issue = NSTextField(wrappingLabelWithString: "")
     private var issueCard: NSView?
     private let feedback = NSTextField(wrappingLabelWithString: "时间和声音将在保存后生效。")
+    private let reminderStatus = NSTextField(wrappingLabelWithString: "")
     private let previewAudio = ReminderAudio()
     private var preferences = Preferences()
 
@@ -133,8 +134,14 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         let timeRow = horizontal([start, end], spacing: 28)
         timeRow.distribution = .fillEqually
         start.widthAnchor.constraint(equalTo: end.widthAnchor).isActive = true
-        let timeCard = card(vertical([timeRow]))
+        reminderStatus.font = .systemFont(ofSize: 12)
+        reminderStatus.textColor = .secondaryLabelColor
+        reminderStatus.setAccessibilityLabel("今日确认与下次提醒")
+        let reminderNote = text("改时间不会重置今日确认。测试声音请点击下方“试听”。", size: 11, secondary: true)
+        let timeCard = card(vertical([timeRow, rule(), reminderStatus, reminderNote], spacing: 10))
         timeRow.widthAnchor.constraint(equalTo: timeCard.widthAnchor, constant: -36).isActive = true
+        reminderStatus.widthAnchor.constraint(equalTo: timeRow.widthAnchor).isActive = true
+        reminderNote.widthAnchor.constraint(equalTo: timeRow.widthAnchor).isActive = true
 
         sound.addItems(withTitles: SoundChoice.allCases.map(\.title))
         sound.setAccessibilityLabel("提醒音效")
@@ -265,6 +272,11 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     func showIssue(_ message: String?) {
         issue.stringValue = message ?? ""
         issueCard?.isHidden = message == nil
+    }
+
+    func showReminderStatus(_ message: String, due: Bool = false) {
+        reminderStatus.stringValue = message
+        reminderStatus.textColor = due ? .systemOrange : .secondaryLabelColor
     }
 
     private func candidate() throws -> Preferences {
