@@ -1,0 +1,13 @@
+.DS_Store
+._*
+dist/
+.build/
+build/
+*.app/
+*.dSYM/
+*.zip
+SHA256SUMS.txt
+*.log
+confirmations.json
+emergency-pause.json
+instance.lock

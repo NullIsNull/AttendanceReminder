@@ -1,0 +1,254 @@
+// SPDX-License-Identifier: GPL-3.0-only
+import Foundation
+import Darwin
+
+enum PunchSlot: String, Codable, CaseIterable {
+    case morning, evening
+
+    var title: String { self == .morning ? "上班打卡" : "下班打卡" }
+}
+
+struct ClockTime: Equatable {
+    let hour: Int
+    let minute: Int
+    var text: String { String(format: "%02d:%02d", hour, minute) }
+    var minutesSinceMidnight: Int { hour * 60 + minute }
+
+    init(_ input: String) throws {
+        let normalized = input.replacingOccurrences(of: "：", with: ":")
+        guard normalized.range(of: "^[0-9]{1,2}:[0-9]{2}$", options: .regularExpression) != nil else {
+            throw ReminderError.system("时间格式不正确：\(input)。使用 24 小时制，例如 10:10、19:10。")
+        }
+        let parts = normalized.split(separator: ":")
+        guard let hour = Int(parts[0]), let minute = Int(parts[1]),
+              (0...23).contains(hour), (0...59).contains(minute) else {
+            throw ReminderError.system("时间超出范围：\(input)。小时为 00–23，分钟为 00–59。")
+        }
+        self.hour = hour
+        self.minute = minute
+    }
+}
+
+struct ReminderTimes: Equatable {
+    let morning: ClockTime
+    let evening: ClockTime
+    static let defaults = try! ReminderTimes(arguments: [])
+
+    init(arguments: [String]) throws {
+        guard arguments.count <= 2 else { throw ReminderError.system("最多提供两个时间参数：上班时间 下班时间。") }
+        morning = try ClockTime(arguments.first ?? "10:00")
+        evening = try ClockTime(arguments.count == 2 ? arguments[1] : "19:10")
+        guard morning.minutesSinceMidnight < evening.minutesSinceMidnight else {
+            throw ReminderError.system("上班时间须早于同一天的下班时间。")
+        }
+    }
+
+    func time(for slot: PunchSlot) -> ClockTime { slot == .morning ? morning : evening }
+    var arguments: [String] { [morning.text, evening.text] }
+}
+
+struct SoundRamp {
+    private var step = 0
+
+    mutating func nextVolume() -> Float {
+        let volume = Float(step + 1) / 5
+        step = min(step + 1, 4)
+        return volume
+    }
+
+    mutating func reset() { step = 0 }
+}
+
+struct ReminderEvent: Equatable {
+    let day: String
+    let slot: PunchSlot
+    let scheduledAt: Date
+    let timeZone: String
+    var id: String { "\(day)/\(slot.rawValue)" }
+}
+
+struct Confirmation: Codable {
+    let day: String
+    let slot: PunchSlot
+    let scheduledAt: Date
+    let confirmedAt: Date
+    let timeZone: String
+}
+
+struct ReminderState: Codable {
+    var version = 1
+    let firstDay: String
+    let createdAt: Date
+    var confirmations: [String: Confirmation] = [:]
+}
+
+struct EmergencyPause: Codable {
+    let requestedAt: Date
+    let until: Date
+}
+
+enum ReminderError: LocalizedError {
+    case invalidState(String)
+    case alreadyRunning
+    case system(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidState(let detail): return "记录文件无法读取：\(detail)。原文件已保留，请从备份恢复后重试。"
+        case .alreadyRunning: return "程序已在运行。"
+        case .system(let detail): return detail
+        }
+    }
+}
+
+enum Schedule {
+    static func calendar(timeZone: TimeZone = .current) -> Calendar {
+        var result = Calendar(identifier: .gregorian)
+        result.locale = Locale(identifier: "en_US_POSIX")
+        result.timeZone = timeZone
+        return result
+    }
+
+    static func dayKey(_ date: Date, calendar: Calendar) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
+    }
+
+    static func dayDate(_ key: String, calendar: Calendar) -> Date? {
+        let parts = key.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3,
+              let date = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])),
+              dayKey(date, calendar: calendar) == key else { return nil }
+        return date
+    }
+
+    static func events(on day: Date, calendar: Calendar, times: ReminderTimes = .defaults) -> [ReminderEvent] {
+        guard (2...6).contains(calendar.component(.weekday, from: day)) else { return [] }
+        return PunchSlot.allCases.compactMap { slot in
+            let time = times.time(for: slot)
+            guard let date = calendar.date(bySettingHour: time.hour, minute: time.minute,
+                                           second: 0, of: day) else { return nil }
+            return ReminderEvent(day: dayKey(day, calendar: calendar), slot: slot,
+                                 scheduledAt: date, timeZone: calendar.timeZone.identifier)
+        }
+    }
+
+    static func pending(state: ReminderState, now: Date, calendar: Calendar, times: ReminderTimes = .defaults) -> [ReminderEvent] {
+        guard var day = dayDate(state.firstDay, calendar: calendar) else { return [] }
+        let today = calendar.startOfDay(for: now)
+        var result: [ReminderEvent] = []
+        while day <= today {
+            result += events(on: day, calendar: calendar, times: times).filter {
+                $0.scheduledAt <= now && state.confirmations[$0.id] == nil
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { break }
+            day = next
+        }
+        return result
+    }
+}
+
+final class StateStore {
+    let directory: URL
+    var stateURL: URL { directory.appendingPathComponent("confirmations.json") }
+    var pauseURL: URL { directory.appendingPathComponent("emergency-pause.json") }
+
+    init(directory: URL) throws {
+        self.directory = directory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+    }
+
+    static var defaultDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ClockInReminder", isDirectory: true)
+    }
+
+    private func decode<T: Decodable>(_ type: T.Type, at url: URL) throws -> T {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(type, from: Data(contentsOf: url))
+    }
+
+    private func write<T: Encodable>(_ value: T, at url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(value)
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.synchronize()
+    }
+
+    func loadOrCreate(now: Date, calendar: Calendar) throws -> ReminderState {
+        if !FileManager.default.fileExists(atPath: stateURL.path) {
+            let initial = ReminderState(firstDay: Schedule.dayKey(now, calendar: calendar), createdAt: now)
+            try write(initial, at: stateURL)
+            return initial
+        }
+        do {
+            let state = try decode(ReminderState.self, at: stateURL)
+            guard state.version == 1, Schedule.dayDate(state.firstDay, calendar: calendar) != nil else {
+                throw ReminderError.invalidState("版本或起始日期不正确")
+            }
+            for (key, value) in state.confirmations {
+                guard key == "\(value.day)/\(value.slot.rawValue)",
+                      Schedule.dayDate(value.day, calendar: calendar) != nil else {
+                    throw ReminderError.invalidState("确认记录键不正确")
+                }
+            }
+            return state
+        } catch {
+            throw ReminderError.invalidState(error.localizedDescription)
+        }
+    }
+
+    func confirm(_ event: ReminderEvent, at now: Date, state: inout ReminderState) throws {
+        guard state.confirmations[event.id] == nil else { return }
+        var candidate = state
+        candidate.confirmations[event.id] = Confirmation(day: event.day, slot: event.slot,
+            scheduledAt: event.scheduledAt, confirmedAt: now, timeZone: event.timeZone)
+        // 写盘成功后才推进内存状态，否则窗口会把保存失败误当作已确认。
+        try write(candidate, at: stateURL)
+        state = candidate
+    }
+
+    func pause(until: Date, now: Date) throws {
+        try write(EmergencyPause(requestedAt: now, until: until), at: pauseURL)
+    }
+
+    func activePause(now: Date) throws -> Date? {
+        guard FileManager.default.fileExists(atPath: pauseURL.path) else { return nil }
+        let value = try decode(EmergencyPause.self, at: pauseURL)
+        return value.until > now ? value.until : nil
+    }
+
+    func clearPause() throws {
+        if FileManager.default.fileExists(atPath: pauseURL.path) {
+            try FileManager.default.removeItem(at: pauseURL)
+        }
+    }
+}
+
+final class InstanceLock {
+    private let descriptor: Int32
+
+    init(directory: URL) throws {
+        let path = directory.appendingPathComponent("instance.lock").path
+        descriptor = open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw ReminderError.system("无法打开运行锁：\(String(cString: strerror(errno)))") }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            let code = errno
+            close(descriptor)
+            if code == EWOULDBLOCK { throw ReminderError.alreadyRunning }
+            throw ReminderError.system("无法获取运行锁：\(String(cString: strerror(code)))")
+        }
+    }
+
+    deinit {
+        flock(descriptor, LOCK_UN)
+        close(descriptor)
+    }
+}
