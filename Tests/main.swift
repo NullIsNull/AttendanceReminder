@@ -257,5 +257,103 @@ test("新提醒重新从低音量开始") {
     try expect(ramp.nextVolume() == 0.2, "新提醒沿用了高音量")
 }
 
+test("新用户设置默认时间、音效和渐强") {
+    let value = try Preferences().validated()
+    try expect(value.times.arguments == ["10:00", "19:10"] && value.sound == .ping && value.increasingVolume && value.maximumVolume == 1, "默认设置错误")
+}
+test("未设置时返回nil且不创建设置文件") {
+    let storage = try store()
+    let value = try storage.loadPreferences()
+    try expect(value == nil && !FileManager.default.fileExists(atPath: storage.preferencesURL.path), "查询创建了设置")
+}
+test("设置保存后重启可读取全部字段") {
+    let storage = try store()
+    var value = Preferences()
+    value.morning = "9：08"
+    value.evening = "20:05"
+    value.sound = .glass
+    value.increasingVolume = false
+    value.maximumVolume = 0.6
+    try storage.savePreferences(value)
+    let loaded = try StateStore(directory: storage.directory).loadPreferences()
+    let expected = try value.validated()
+    try expect(loaded == expected, "设置重读不同")
+}
+test("保存设置不修改打卡确认记录") {
+    let storage = try store()
+    var state = try storage.loadOrCreate(now: date("2026-11-09 08:00:00"), calendar: sg)
+    let event = Schedule.pending(state: state, now: date("2026-11-09 10:00:00"), calendar: sg)[0]
+    try storage.confirm(event, at: date("2026-11-09 10:01:00"), state: &state)
+    let before = try Data(contentsOf: storage.stateURL)
+    var value = Preferences(); value.morning = "10:10"; value.sound = .silent
+    try storage.savePreferences(value)
+    let after = try Data(contentsOf: storage.stateURL)
+    try expect(before == after, "修改设置覆盖了确认记录")
+}
+test("音量边界及非有限值校验") {
+    for invalid in [0.0, 0.09, 1.01, Double.nan, Double.infinity] {
+        var value = Preferences(); value.maximumVolume = invalid
+        var rejected = false
+        do { _ = try value.validated() } catch { rejected = true }
+        try expect(rejected, "接受无效音量")
+    }
+    var value = Preferences(); value.maximumVolume = 0.1
+    let valid = try value.validated()
+    try expect(valid.maximumVolume == 0.1, "拒绝10%音量")
+}
+test("无效时间设置不覆盖原配置") {
+    let storage = try store()
+    try storage.savePreferences(Preferences())
+    let before = try Data(contentsOf: storage.preferencesURL)
+    var value = Preferences(); value.morning = "25:00"
+    var rejected = false
+    do { try storage.savePreferences(value) } catch { rejected = true }
+    let after = try Data(contentsOf: storage.preferencesURL)
+    try expect(rejected && before == after, "无效设置覆盖了原配置")
+}
+test("损坏设置报错并保留原文件") {
+    let storage = try store()
+    let original = Data("{broken".utf8)
+    try original.write(to: storage.preferencesURL)
+    var rejected = false
+    do { _ = try storage.loadPreferences() } catch { rejected = true }
+    let after = try Data(contentsOf: storage.preferencesURL)
+    try expect(rejected && after == original, "损坏设置被覆盖")
+}
+test("设置写入失败可重试且不伪装保存成功") {
+    let storage = try store()
+    try FileManager.default.createDirectory(at: storage.preferencesURL, withIntermediateDirectories: false)
+    var rejected = false
+    do { try storage.savePreferences(Preferences()) } catch { rejected = true }
+    try expect(rejected, "写入失败未报错")
+}
+test("所有音效含静音可往返保存") {
+    let storage = try store()
+    for choice in SoundChoice.allCases {
+        var value = Preferences(); value.sound = choice
+        try storage.savePreferences(value)
+        let loaded = try storage.loadPreferences()
+        try expect(loaded?.sound == choice, "音效保存错误")
+    }
+}
+test("旧版默认时间与自定义参数读取") {
+    func encoded(_ args: [String]) throws -> Data {
+        try PropertyListSerialization.data(fromPropertyList: ["Label":"local.clockin.reminder", "ProgramArguments":args], format: .xml, options: 0)
+    }
+    let defaults = try LegacyConfiguration.times(from: encoded(["/Applications/Old.app/Contents/MacOS/ClockInReminder"]))
+    let custom = try LegacyConfiguration.times(from: encoded(["/Applications/Old.app/Contents/MacOS/ClockInReminder", "10:10", "20:05"]))
+    try expect(defaults == .defaults && custom.arguments == ["10:10", "20:05"], "旧配置迁移错误")
+}
+test("拒绝其他应用的启动配置") {
+    let data = try PropertyListSerialization.data(fromPropertyList: ["Label":"another.app", "ProgramArguments":["/bin/true"]], format: .xml, options: 0)
+    var rejected = false
+    do { _ = try LegacyConfiguration.times(from: data) } catch { rejected = true }
+    try expect(rejected, "接受了其他应用的配置")
+}
+test("等待系统允许不显示为启动成功") {
+    try expect(StartupStatus.needsApproval.isRequested && StartupStatus.needsApproval.description.contains("等待系统允许"), "授权中状态错误")
+    try expect(!StartupStatus.disabled.isRequested && !StartupStatus.unavailable.isRequested && StartupStatus.enabled.isRequested, "开关状态错误")
+}
+
 print("\n\(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)

@@ -59,6 +59,71 @@ struct SoundRamp {
     mutating func reset() { step = 0 }
 }
 
+enum SoundChoice: String, Codable, CaseIterable {
+    case ping = "Ping", glass = "Glass", pop = "Pop", purr = "Purr", submarine = "Submarine"
+    case chime, silent
+
+    var title: String {
+        switch self {
+        case .ping: return "清脆 · Ping"
+        case .glass: return "玻璃 · Glass"
+        case .pop: return "轻响 · Pop"
+        case .purr: return "轻颤 · Purr"
+        case .submarine: return "潜艇 · Submarine"
+        case .chime: return "内置铃声"
+        case .silent: return "无声音"
+        }
+    }
+}
+
+struct Preferences: Codable, Equatable {
+    var version = 1
+    var morning = "10:00"
+    var evening = "19:10"
+    var sound: SoundChoice = .ping
+    var increasingVolume = true
+    var maximumVolume: Double = 1
+
+    func validated() throws -> Preferences {
+        guard version == 1 else { throw ReminderError.system("设置版本不支持，请保留原文件并联系维护者。") }
+        let times = try ReminderTimes(arguments: [morning, evening])
+        guard maximumVolume.isFinite, (0.1...1).contains(maximumVolume) else {
+            throw ReminderError.system("最大音量须在 10% 到 100% 之间。")
+        }
+        var result = self
+        result.morning = times.morning.text
+        result.evening = times.evening.text
+        return result
+    }
+
+    var times: ReminderTimes { try! ReminderTimes(arguments: [morning, evening]) }
+}
+
+enum StartupStatus {
+    case disabled, enabled, needsApproval, unavailable
+
+    var isRequested: Bool { self == .enabled || self == .needsApproval }
+    var description: String {
+        switch self {
+        case .disabled: return "已关闭，登录 Mac 后不会自动打开。"
+        case .enabled: return "已开启，登录 Mac 后自动在菜单栏运行。"
+        case .needsApproval: return "等待系统允许，请打开系统登录项完成设置。"
+        case .unavailable: return "系统未找到此应用，请移到“应用程序”后重试。"
+        }
+    }
+}
+
+enum LegacyConfiguration {
+    static func times(from data: Data) throws -> ReminderTimes {
+        guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              plist["Label"] as? String == "local.clockin.reminder",
+              let arguments = plist["ProgramArguments"] as? [String], !arguments.isEmpty else {
+            throw ReminderError.system("旧版启动配置格式不正确，未修改该文件。")
+        }
+        return try ReminderTimes(arguments: Array(arguments.dropFirst().prefix { !$0.hasPrefix("-") }))
+    }
+}
+
 struct ReminderEvent: Equatable {
     let day: String
     let slot: PunchSlot
@@ -152,6 +217,7 @@ final class StateStore {
     let directory: URL
     var stateURL: URL { directory.appendingPathComponent("confirmations.json") }
     var pauseURL: URL { directory.appendingPathComponent("emergency-pause.json") }
+    var preferencesURL: URL { directory.appendingPathComponent("preferences.json") }
 
     init(directory: URL) throws {
         self.directory = directory
@@ -229,6 +295,15 @@ final class StateStore {
         if FileManager.default.fileExists(atPath: pauseURL.path) {
             try FileManager.default.removeItem(at: pauseURL)
         }
+    }
+
+    func loadPreferences() throws -> Preferences? {
+        guard FileManager.default.fileExists(atPath: preferencesURL.path) else { return nil }
+        return try decode(Preferences.self, at: preferencesURL).validated()
+    }
+
+    func savePreferences(_ preferences: Preferences) throws {
+        try write(preferences.validated(), at: preferencesURL)
     }
 }
 

@@ -3,11 +3,12 @@
 <plist version="1.0"><dict>
   <key>CFBundleIdentifier</key><string>local.clockin.reminder</string>
   <key>CFBundleExecutable</key><string>ClockInReminder</string>
-  <key>CFBundleName</key><string>ClockInReminder</string>
-  <key>CFBundleDisplayName</key><string>打卡提醒</string>
+  <key>CFBundleName</key><string>AttendanceReminder</string>
+  <key>CFBundleDisplayName</key><string>AttendanceReminder</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.1.0</string>
-  <key>CFBundleVersion</key><string>2</string>
+  <key>CFBundleShortVersionString</key><string>2.0.0</string>
+  <key>CFBundleVersion</key><string>3</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

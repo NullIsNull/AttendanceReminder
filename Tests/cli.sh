@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "$0")/.." && pwd)"
-binary="$project_dir/dist/ClockInReminder.app/Contents/MacOS/ClockInReminder"
+binary="$project_dir/dist/AttendanceReminder.app/Contents/MacOS/ClockInReminder"
 [[ "$("$binary" --validate-times)" == '10:00 19:10' ]]
 [[ "$("$binary" 10:10 --validate-times)" == '10:10 19:10' ]]
 [[ "$("$binary" 9：08 20:05 --validate-times)" == '09:08 20:05' ]]

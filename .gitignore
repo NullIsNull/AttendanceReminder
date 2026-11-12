@@ -6,6 +6,8 @@ build/
 *.app/
 *.dSYM/
 *.zip
+*.dmg
+preferences.json
 SHA256SUMS.txt
 *.log
 confirmations.json

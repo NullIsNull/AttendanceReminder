@@ -1,75 +1,43 @@
 # 故障排查
 
-## 菜单栏没有“打卡”
+## 安装后无法打开
 
-1. 检查是否处于紧急暂停，暂停期内程序会退出：
+安装包采用本地临时签名，未经过 Apple 公证。确认来源后，可按“系统设置 → 隐私与安全性”的提示允许打开。若文件无法挂载或校验失败，重新取得安装包，不要通过关闭系统安全检查处理损坏文件。
 
-   ```bash
-   "$HOME/Applications/ClockInReminder.app/Contents/MacOS/ClockInReminder" --status
-   ```
+先把应用拖入“应用程序”再运行；直接在 DMG 中运行时，开启登录启动会提示先安装。普通用户安装可能由 Finder 请求管理员确认，这是目标“应用程序”目录的权限要求。
 
-   自定义时间时，查询也传入相同参数，例如在 `--status` 前加 `10:10 19:10`；输出会显示本次查询使用的时间。菜单栏中的“今日状态”直接使用运行实例的时间。
+## 菜单栏没有图标
 
-2. 检查后台服务：
+从“应用程序”重新打开 AttendanceReminder。应用运行时只有右上角菜单栏图标，Dock 没有图标。图标过多时可检查菜单栏管理工具是否隐藏了它。
 
-   ```bash
-   launchctl print "gui/$(id -u)/local.clockin.reminder"
-   ```
+暂停 15 分钟期间图标保留；紧急退出后图标消失，直到再次打开。需要下次登录自动运行时，在设置中开启“登录 Mac 时自动启动”。如果显示等待系统允许，点击“打开系统登录项…”并按系统提示处理；仅勾选而未获得系统允许不代表已经生效。
 
-   `Could not find service` 表示尚未注册，可重新运行安装脚本。
+## 旧版程序重复弹窗
 
-3. 查看错误日志：
+设置中点击“迁移旧版启动配置…”，完成后核对时间。如果提示旧版仍在运行，从旧版菜单栏退出，再在新版窗口点击“重试读取记录”。不要同时保留旧服务和新版登录项。
 
-   ```bash
-   tail -n 40 "$HOME/Library/Logs/ClockInReminder/agent-error.log"
-   ```
+迁移失败时保留错误文字，检查 `~/Library/LaunchAgents/local.clockin.reminder.plist` 是否仍存在。旧版已停用的备份文件以 `.disabled-` 结尾前缀标识，不会被自动加载。
 
-4. 检查“系统设置 → 通用 → 登录项与扩展”中是否允许这个程序在后台运行。不同 macOS 版本的名称可能不同。若程序被安全机制阻止，使用 README 中的本机编译方式重装。
+## 没有声音
 
-不要用 `sudo` 安装，也不要修改 `/Library/LaunchDaemons`。本程序只在安装用户的图形登录会话中运行。
+在设置中确认音效不是“无声音”，提高最大音量并点击“试听”。检查 Mac 静音、声音输出设备及系统音效音量。渐强模式第一声只有所设上限的 20%，之后约每 30 秒提高一档；程序不自动解除静音。
+
+`--preview --silent` 演示不播放。若从终端启动看到“提示音播放失败”，表示系统音效和包内声音均未能播放，窗口提醒仍有效。
 
 ## 窗口挡住考勤页面
 
-拖动窗口顶部，把窗口移到屏幕一侧，再操作考勤页面。多显示器窗口确认的是同一项，不会多记一次。无法操作或窗口失去响应时，使用紧急退出或手动停止。
+拖动窗口顶部移开，或暂停 15 分钟。不要用“已打卡”代替暂停，否则当天对应时段会被记录为已确认。程序无响应时，在活动监视器结束 `ClockInReminder`；新版不会自动每分钟拉起。
 
-## 没有提示音
+## 设置或确认记录无法保存
 
-检查 Mac 是否静音、输出设备是否连接、系统音效音量是否为零。首次提示音为自身音量的 20%，每 30 秒增大一档，正常连续播放约 2 分钟达到 100%。程序不会强制打开声音，也不会提高系统音量。演示命令带 `--silent` 时不会播放声音。
+程序会保留窗口并报告错误，未保存的确认不算完成。检查磁盘空间及 `~/Library/Application Support/ClockInReminder` 的写入权限。
 
-若日志出现“提示音播放失败”，系统音效和包内后备音效均未能播放，窗口提醒仍然有效。
+处理损坏文件前先退出程序，复制整个状态目录作为备份。设置文件是 `preferences.json`，确认文件是 `confirmations.json`，可以分别恢复；恢复后重新打开应用。不要在程序运行时编辑这些文件。
 
-## 确认记录无法读取或保存
+如果没有备份且决定重置，先保留损坏文件，再移走对应文件。移走设置文件会恢复默认设置；移走确认文件会丢失历史确认，重新从当天开始，不会自动恢复旧记录。
 
-先停止后台服务，保留原文件再处理。不要在程序运行时手动修改记录。
+## 图形卸载失败
 
-```bash
-launchctl bootout "gui/$(id -u)/local.clockin.reminder"
-open "$HOME/Library/Application Support/ClockInReminder"
-```
+先关闭登录启动并退出程序，再通过 Finder 移入废纸篓。若缺少删除 `/Applications` 的权限，按 Finder 的管理员提示操作；不要改动其他应用目录。
 
-从已有备份恢复 `confirmations.json`，或修复该目录的用户写权限。恢复后执行：
-
-```bash
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.clockin.reminder.plist"
-```
-
-没有备份且决定丢弃旧记录时，先把原文件复制到其他目录留存，再删除记录文件。重新启动会从当天初始化，旧的已确认信息不会自动恢复。只删除损坏文件即可，不需要修改程序源码。
-
-## 手动停止与恢复
-
-卸载脚本不可用时，先停止后台服务：
-
-```bash
-launchctl bootout "gui/$(id -u)/local.clockin.reminder"
-```
-
-这会结束由该服务启动的进程。手动双击启动的副本可在“活动监视器”中选择 `ClockInReminder` 并退出。停止后如要防止下次登录启动，可运行内置卸载脚本，或把对应 LaunchAgent 文件移出 `~/Library/LaunchAgents`。
-
-需要恢复且 plist 仍在原位置时：
-
-```bash
-launchctl enable "gui/$(id -u)/local.clockin.reminder"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.clockin.reminder.plist"
-```
-
-已经加载时不重复 `bootstrap`，改用 `launchctl kickstart "gui/$(id -u)/local.clockin.reminder"`。
+开发者可在源码目录运行 `bash uninstall.sh`；脚本优先处理 `~/Applications/AttendanceReminder.app`，不存在时处理 `/Applications/AttendanceReminder.app`。存在旧版 LaunchAgent 时须先迁移，防止残留服务再次启动。默认保留数据，`--purge` 会直接删除设置、确认记录和旧版日志。

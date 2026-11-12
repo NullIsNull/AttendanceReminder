@@ -19,7 +19,18 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     let preview: Bool
     let silent: Bool
     let autoExit: TimeInterval?
-    let times: ReminderTimes
+    let initialTimes: ReminderTimes?
+    let settingsPreview: Bool
+    let openSettingsAtLaunch: Bool
+    private var preferences = Preferences()
+    private var times: ReminderTimes { preferences.times }
+    private var pausedUntil: Date?
+    private var awaitingSetup = false
+    private var settingsController: SettingsWindow?
+    private var scheduleItem: NSMenuItem?
+    private var summaryItem: NSMenuItem?
+    private var resumeItem: NSMenuItem?
+    private lazy var startup = LoginStartup(preview: preview || settingsPreview)
     private var store: StateStore?
     private var instanceLock: InstanceLock?
     private var state: ReminderState?
@@ -34,32 +45,40 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private var problem: String?
     private var dialogOpen = false
     private var previewFinished = false
-    private var sound: NSSound?
-    private var fallbackSound: NSSound?
+    private let audio = ReminderAudio()
     private var soundRamp = SoundRamp()
 
-    init(directory: URL, preview: Bool, silent: Bool, autoExit: TimeInterval?, times: ReminderTimes) {
+    init(directory: URL, preview: Bool, silent: Bool, autoExit: TimeInterval?, times: ReminderTimes?, settingsPreview: Bool, openSettingsAtLaunch: Bool) {
         self.directory = directory
         self.preview = preview
         self.silent = silent
         self.autoExit = autoExit
-        self.times = times
+        self.initialTimes = times
+        self.settingsPreview = settingsPreview
+        self.openSettingsAtLaunch = openSettingsAtLaunch
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        if !preview && !settingsPreview { loadState() }
+        else {
+            if preview, FileManager.default.fileExists(atPath: directory.appendingPathComponent("preferences.json").path),
+               let previewStore = try? StateStore(directory: directory), let saved = try? previewStore.loadPreferences() {
+                preferences = saved
+            }
+            if let initialTimes = initialTimes {
+                preferences.morning = initialTimes.morning.text
+                preferences.evening = initialTimes.evening.text
+            }
+        }
         configureMenu()
         configureObservers()
-        sound = NSSound(named: NSSound.Name("Ping"))
-        if let url = Bundle.main.url(forResource: "reminder", withExtension: "wav") {
-            fallbackSound = NSSound(contentsOf: url, byReference: false)
-        }
-        if !preview { loadState() }
+        if awaitingSetup || settingsPreview || openSettingsAtLaunch || startup.hasLegacyAgent { showSettings() }
         tick()
         timer = Timer(timeInterval: 5, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
         timer?.tolerance = 0.5
         RunLoop.main.add(timer!, forMode: .common)
-        if let seconds = autoExit, preview {
+        if let seconds = autoExit, preview || settingsPreview {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { NSApp.terminate(nil) }
         }
     }
@@ -67,16 +86,35 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     private func loadState() {
         do {
             if store == nil { store = try StateStore(directory: directory) }
-            if instanceLock == nil { instanceLock = try InstanceLock(directory: directory) }
-            if let until = try store?.activePause(now: Date()) {
-                fputs("紧急暂停中，恢复时间：\(until.ISO8601Format())\n", stderr)
-                exit(0)
+            let savedPreferences = try store?.loadPreferences()
+            if let saved = savedPreferences { preferences = saved }
+            else if startup.hasLegacyAgent {
+                let legacyTimes = try LegacyConfiguration.times(from: Data(contentsOf: startup.legacyURL))
+                preferences.morning = legacyTimes.morning.text
+                preferences.evening = legacyTimes.evening.text
             }
+            if let initialTimes = initialTimes {
+                preferences.morning = initialTimes.morning.text
+                preferences.evening = initialTimes.evening.text
+            }
+            if instanceLock == nil { instanceLock = try InstanceLock(directory: directory) }
             state = try store?.loadOrCreate(now: Date(), calendar: Schedule.calendar())
+            try store?.savePreferences(preferences)
+            pausedUntil = try store?.activePause(now: Date())
+            awaitingSetup = savedPreferences == nil
             problem = nil
         } catch ReminderError.alreadyRunning {
-            fputs("程序已在运行。新参数不会改变现有进程；先紧急退出，再重新启动或更新安装。\n", stderr)
-            exit(0)
+            let modernInstance = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "local.clockin.reminder")
+                .first { app in
+                    guard app.processIdentifier != getpid(), let url = app.bundleURL,
+                          let version = Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return false }
+                    return version.compare("2.0", options: .numeric) != .orderedAscending
+                }
+            if modernInstance != nil {
+                DistributedNotificationCenter.default().postNotificationName(Notification.Name("local.clockin.reminder.showSettings"), object: directory.path)
+                exit(0)
+            }
+            problem = "旧版提醒程序仍在运行。先从旧版菜单栏退出，再点击“重试读取记录”；若有旧版启动配置，可从设置中迁移。"
         } catch {
             problem = error.localizedDescription
         }
@@ -84,20 +122,38 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func configureMenu() {
         let menu = NSMenu()
-        menu.addItem(withTitle: "周一至周五 · \(times.morning.text) / \(times.evening.text)", action: nil, keyEquivalent: "")
+        menu.autoenablesItems = false
+        scheduleItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        summaryItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        scheduleItem?.isEnabled = false
+        summaryItem?.isEnabled = false
+        menu.addItem(scheduleItem!)
+        menu.addItem(summaryItem!)
         menu.addItem(.separator())
+        let settings = NSMenuItem(title: "设置…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
         addMenuItem("显示提醒 / 今日状态", action: #selector(showStatus), to: menu)
         addMenuItem("演示提醒（不写记录）", action: #selector(startPreview), to: menu)
+        addMenuItem("使用说明", action: #selector(openGuide), to: menu)
         addMenuItem("打开确认记录文件夹", action: #selector(openRecords), to: menu)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "紧急退出（暂停 15 分钟）…", action: #selector(emergencyExit), keyEquivalent: "q")
-        quit.keyEquivalentModifierMask = [.command, .control, .option]
+        addMenuItem("暂停 15 分钟", action: #selector(pauseReminders), to: menu)
+        resumeItem = NSMenuItem(title: "立即恢复提醒", action: #selector(resumeReminders), keyEquivalent: "")
+        resumeItem?.target = self
+        menu.addItem(resumeItem!)
+        let quit = NSMenuItem(title: "紧急退出…", action: #selector(emergencyExit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem?.button?.title = preview ? "打卡演示" : "打卡"
-        statusItem?.button?.toolTip = "工作日 \(times.morning.text) 和 \(times.evening.text) 打卡提醒"
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let icon = NSImage(systemSymbolName: "clock.badge.checkmark", accessibilityDescription: "打卡提醒")
+            ?? NSImage(systemSymbolName: "clock", accessibilityDescription: "打卡提醒")
+        icon?.isTemplate = true
+        icon?.size = NSSize(width: 18, height: 18)
+        statusItem?.button?.image = icon
+        statusItem?.button?.setAccessibilityLabel("打卡提醒")
         statusItem?.menu = menu
+        updateStatusTitle(calendar: Schedule.calendar(), now: Date())
 
         let mainMenu = NSMenu()
         let root = NSMenuItem()
@@ -111,7 +167,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
                 self.emergencyExit()
                 return nil
             }
-            if !self.panels.isEmpty && !self.dialogOpen {
+            if !self.panels.isEmpty && !self.dialogOpen && self.settingsController?.window?.isKeyWindow != true {
                 if input.keyCode == 53 { return nil }
                 if flags.contains(.command), ["w", "m", "h"].contains(input.charactersIgnoringModifiers?.lowercased() ?? "") {
                     return nil
@@ -145,12 +201,29 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         observe(NSApplication.didChangeScreenParametersNotification, center: .default, rebuild: true)
         observe(.NSSystemTimeZoneDidChange, center: .default, rebuild: true)
         observe(.NSSystemClockDidChange, center: .default, rebuild: true)
+        let center = DistributedNotificationCenter.default()
+        let token = center.addObserver(forName: Notification.Name("local.clockin.reminder.showSettings"), object: directory.path, queue: .main) { [weak self] _ in
+            self?.showSettings()
+        }
+        observers.append((center, token))
     }
 
     @objc private func tick() {
         guard !dialogOpen, !previewFinished else { return }
         let now = Date()
         let calendar = Schedule.calendar()
+        if settingsController?.window?.isVisible == true { settingsController?.refreshStartup() }
+        if settingsPreview || awaitingSetup { return }
+        if let until = pausedUntil, until > now {
+            closePanels()
+            event = nil
+            displayedID = nil
+            lastSound = nil
+            soundRamp.reset()
+            updateStatusTitle(calendar: calendar, now: now)
+            return
+        }
+        pausedUntil = nil
         if let problem = problem {
             if displayedID != "error:\(problem)" {
                 showPanels(title: "确认记录需要处理", time: "保存未完成", detail: problem,
@@ -194,22 +267,28 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             for panel in panels { panel.orderFrontRegardless() }
         }
         if !silent && (lastSound == nil || now.timeIntervalSince(lastSound!) >= 30) {
-            let volume = soundRamp.nextVolume()
-            sound?.volume = volume
-            if sound?.play() != true {
-                fallbackSound?.volume = volume
-                if fallbackSound?.play() != true { fputs("提示音播放失败，窗口提醒继续显示。\n", stderr) }
-            }
+            let volume = (preferences.increasingVolume ? soundRamp.nextVolume() : 1) * Float(preferences.maximumVolume)
+            audio.play(preferences.sound, volume: volume)
             lastSound = now
         }
-        statusItem?.button?.title = preview ? "打卡演示" : "打卡 · 待确认"
+        updateStatusTitle(calendar: calendar, now: now)
+        summaryItem?.title = preview ? "正在演示提醒" : "还有 \(pending.count) 项待确认"
+        settingsController?.setAboveReminder(!panels.isEmpty)
     }
 
     private func updateStatusTitle(calendar: Calendar, now: Date) {
         let day = Schedule.dayKey(now, calendar: calendar)
         let count = PunchSlot.allCases.filter { state?.confirmations["\(day)/\($0.rawValue)"] != nil }.count
         let weekday = (2...6).contains(calendar.component(.weekday, from: now))
-        statusItem?.button?.title = weekday ? "打卡 \(count)/2" : "打卡 · 周末"
+        scheduleItem?.title = "工作日 · \(times.morning.text) / \(times.evening.text)"
+        summaryItem?.title = weekday ? "今日已确认 \(count)/2" : "周末不产生新提醒"
+        if let until = pausedUntil, until > now {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm"
+            summaryItem?.title = "已暂停，\(formatter.string(from: until)) 恢复"
+        }
+        resumeItem?.isEnabled = pausedUntil != nil
+        statusItem?.button?.toolTip = "打卡提醒 · \(summaryItem?.title ?? "") · \(times.morning.text) / \(times.evening.text)"
     }
 
     private func label(_ text: String, size: CGFloat, color: NSColor, weight: NSFont.Weight = .regular) -> NSTextField {
@@ -265,8 +344,8 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
             confirm.translatesAutoresizingMaskIntoConstraints = false
             // 不把回车设为默认确认键，避免窗口出现时吞掉其他应用的回车。
             confirm.keyEquivalent = ""
-            let emergency = NSButton(title: preview ? "退出演示" : "紧急退出（暂停 15 分钟）…",
-                                     target: self, action: #selector(emergencyExit))
+            let emergency = NSButton(title: preview ? "退出演示" : "暂停 15 分钟",
+                                     target: self, action: preview ? #selector(emergencyExit) : #selector(pauseReminders))
             emergency.bezelStyle = .rounded
             emergency.controlSize = .regular
             emergency.translatesAutoresizingMaskIntoConstraints = false
@@ -292,13 +371,14 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         NSApp.activate(ignoringOtherApps: true)
         let target = panels.first { $0.screen == NSScreen.main } ?? panels.first
         target?.makeKeyAndOrderFront(nil)
+        settingsController?.setAboveReminder(true)
+        if settingsController?.window?.isVisible == true { settingsController?.window?.makeKeyAndOrderFront(nil) }
     }
 
     private func closePanels() {
         for panel in panels { panel.orderOut(nil); panel.close() }
         panels.removeAll()
-        sound?.stop()
-        fallbackSound?.stop()
+        audio.stop()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { false }
@@ -325,26 +405,21 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
     @objc private func retryLoading() {
         loadState()
         displayedID = nil
+        if awaitingSetup { showSettings() }
         tick()
     }
 
     @objc private func emergencyExit() {
         guard !dialogOpen else { return }
-        if preview { NSApp.terminate(nil); return }
-        let alert = makeAlert(title: "暂停 15 分钟并退出？",
-                              text: "本次不会记作已打卡。安装后会在 15 分钟到期后的约 1 分钟内重新提醒。\n永久停止请运行卸载脚本。")
-        alert.addButton(withTitle: "继续提醒")
-        alert.addButton(withTitle: "暂停并退出")
+        if preview || settingsPreview { NSApp.terminate(nil); return }
+        let alert = makeAlert(title: "退出打卡提醒？",
+            text: "退出不会记作已打卡。退出后不再提醒，直到你再次打开应用；开启登录启动后，下次登录也会恢复。临时离开可选择“暂停 15 分钟”。")
+        alert.addButton(withTitle: "继续运行")
+        alert.addButton(withTitle: "退出程序")
         dialogOpen = true
         let result = alert.runModal()
         dialogOpen = false
         guard result == .alertSecondButtonReturn else { return }
-        do {
-            let store = try self.store ?? StateStore(directory: directory)
-            try store.pause(until: Date().addingTimeInterval(15 * 60), now: Date())
-        } catch {
-            showAlert(title: "暂停时间未保存", text: "\(error.localizedDescription)\n程序仍会退出；后台服务可能在 1 分钟内再次启动。可运行卸载脚本永久停止。")
-        }
         NSApp.terminate(nil)
     }
 
@@ -386,8 +461,81 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
         guard let executable = Bundle.main.executableURL else { return }
         let process = Process()
         process.executableURL = executable
-        process.arguments = times.arguments + ["--preview"]
+        process.arguments = times.arguments + ["--preview", "--state-dir", directory.path]
         do { try process.run() } catch { showAlert(title: "无法启动演示", text: error.localizedDescription) }
+    }
+
+    @objc private func showSettings() {
+        if settingsController == nil {
+            settingsController = SettingsWindow(startup: startup, onSave: { [weak self] value in
+                guard let self = self else { return }
+                if !self.settingsPreview && !self.preview {
+                    guard self.instanceLock != nil, let store = self.store else {
+                        throw ReminderError.system("请先退出旧版提醒程序或完成迁移，再保存设置。")
+                    }
+                    try store.savePreferences(value)
+                }
+                self.preferences = value
+                self.awaitingSetup = false
+                self.event = nil
+                self.displayedID = nil
+                self.lastSound = nil
+                self.soundRamp.reset()
+                self.audio.stop()
+            }, onClose: { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.awaitingSetup = false
+                    if self.settingsPreview { NSApp.terminate(nil) }
+                    else { self.tick() }
+                }
+            }, onMigration: { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    self?.loadState()
+                    if let self = self { self.settingsController?.reload(self.preferences) }
+                    self?.awaitingSetup = false
+                    self?.displayedID = nil
+                    self?.tick()
+                }
+            })
+        }
+        settingsController?.show(preferences: preferences, aboveReminder: !panels.isEmpty)
+    }
+
+    @objc private func pauseReminders() {
+        if preview || settingsPreview { NSApp.terminate(nil); return }
+        do {
+            let until = Date().addingTimeInterval(15 * 60)
+            guard instanceLock != nil, let store = store else {
+                throw ReminderError.system("记录目录尚未就绪，或旧版仍在运行。可使用菜单栏的紧急退出。")
+            }
+            try store.pause(until: until, now: Date())
+            pausedUntil = until
+            tick()
+        } catch { showAlert(title: "暂停未保存", text: error.localizedDescription) }
+    }
+
+    @objc private func resumeReminders() {
+        do {
+            guard instanceLock != nil, let store = store else {
+                throw ReminderError.system("记录目录尚未就绪，或旧版仍在运行。")
+            }
+            try store.clearPause()
+            pausedUntil = nil
+            lastSound = nil
+            tick()
+        } catch { showAlert(title: "恢复失败", text: error.localizedDescription) }
+    }
+
+    @objc private func openGuide() {
+        if let url = Bundle.main.url(forResource: "使用说明", withExtension: "md", subdirectory: "Support/docs") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings()
+        return false
     }
 
     @objc private func openRecords() {
@@ -398,7 +546,7 @@ final class ReminderApplication: NSObject, NSApplicationDelegate, NSWindowDelega
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
-        sound?.stop()
+        audio.stop()
         if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
         for (center, token) in observers { center.removeObserver(token) }
         closePanels()

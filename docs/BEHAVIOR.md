@@ -1,78 +1,67 @@
 # 运行规则与实现
 
-## 调度与确认
+## 调度和持久化
+
+`Sources/ReminderCore.swift` 按公历和 Mac 当前时区生成工作日待办。`Sources/ReminderApplication.swift` 每 5 秒检查，并监听唤醒、会话恢复、时区、时钟和显示器变化。正常运行时到点后在下一次检查提醒；系统繁忙、睡眠或未登录时延后。
 
 | 场景 | 行为 |
 | --- | --- |
-| 周一至周五 | 按启动参数生成上班、下班提醒，默认本地 10:00、19:10 |
-| 周六、周日 | 不生成新提醒；仍可补出之前工作日的遗漏项 |
-| 首次启用 | 从当日本地日期开始，补出今天已到点的项目 |
-| 睡眠、关机、退出登录 | 不唤醒电脑；恢复运行后按记录补出遗漏项 |
-| 跨多天未确认 | 按日期、上班、下班顺序逐项补提醒，不自动过期 |
-| 已确认 | 相同本地日期和时段不重复提醒 |
-| 重复点击 | 同一键只保存第一次确认；下一项需要再次点击 |
-| 紧急退出 | 保存 15 分钟暂停并退出，不增加确认记录 |
-| 保存失败 | 保留当前提醒；提示错误 |
-| 记录损坏或版本不支持 | 报错并保留原文件，不重建空历史 |
+| 周一至周五 | 按设置生成上班、下班两项，首次默认 10:00、19:10 |
+| 周末 | 不产生新项，仍补出之前工作日的遗漏 |
+| 首次启用 | 从当日本地日期开始，不追溯更早日期 |
+| 睡眠、关机、退出登录 | 不唤醒电脑，恢复运行后重新计算遗漏 |
+| 跨多天未确认 | 按日期和时段逐项补提醒，不自动过期 |
+| 已确认或重复点击 | 相同“本地日期/时段”仅记录第一次确认 |
+| 修改提醒时间 | 已确认项保留，未确认历史按新时间计算 |
+| 暂停 | 持久化 15 分钟期限，进程保持运行，到期恢复 |
+| 紧急退出 | 真正退出，不写确认，不自动在一分钟后拉起 |
+| 保存失败 | 保留待办和原记录，提示错误 |
+| 文件损坏或未知版本 | 报错并保留原文件，不静默重建历史 |
 
-不处理节假日、调休或请假。周一至周五固定视为工作日；长期离开后仍要逐项确认遗漏提醒。历史补提醒只表示本机提醒已处理，不能补交考勤。若需重置全部历史，卸载时用 `--purge`，重装从当天开始。
+不处理节假日、调休或请假。跨国际日期变更线或手动修改日期可能形成新的日期待办，程序不判断实际出勤地点。
 
-使用公历和 Mac 当前时区，不固定为新加坡或哥伦比亚。时区变更后按新的本地日期和时间计算；相同日期的已确认时段不再提醒。跨国际日期变更线、手动修改系统日期可能生成新的日期待办，程序不会判断实际出勤地或修正人为时钟错误。
+独占文件锁保护状态写入；确认、设置和暂停采用原子替换并同步文件内容，成功后才更新内存状态。确认键不包含可修改的时刻，避免修改时间导致重复提醒。
 
-第一个、第二个时间参数分别控制上班和下班；省略值使用默认时间。`ReminderTimes` 校验 24 小时制和同日先后顺序。确认键保持“日期/时段”，修改时刻不会重置已确认项，历史未确认项按新时刻补提醒。
+## 窗口与声音
 
-## 常驻与补提醒
+每个显示器有一个同步的 `NSPanel`，使用 `screenSaver` 层级、`canJoinAllSpaces` 和 `fullScreenAuxiliary`。窗口可拖动，每 5 秒重新置前；只在首次显示、切换待办或重建时激活，避免持续抢夺考勤页面的键盘焦点。设置窗口在提醒之上，可关闭。
 
-`Sources/ReminderApplication.swift` 每 5 秒检查待办，并监听系统唤醒、屏幕唤醒、会话恢复、时区和系统时钟变化。正常运行时，到点后在下次检查显示窗口，通常不超过约 5 秒；系统繁忙、睡眠或会话未恢复时会推迟。
+提醒不提供关闭和最小化按钮；确认按钮不绑定回车，避免出现时误接收正在输入的回车。保留暂停、紧急退出及系统强制退出。普通应用窗口不能覆盖锁屏和系统安全界面，也不能阻止注销或关机。
 
-`write-agent.sh` 生成当前用户的 LaunchAgent：
+`Sources/ReminderAudio.swift` 使用 `NSSound`。系统音效不可用时改用包内 `reminder.wav`；两条路径均按设置限制音量。每 30 秒播放一次，渐强档位为 20%、40%、60%、80%、100%，乘以配置的最大音量。每条新提醒或暂停恢复后重置，显示器变化造成的同一待办窗口重建不重置。关闭渐强后固定为最大音量，静音选项不播放。
 
-- `RunAtLoad=true`：登录加载时启动。
-- `KeepAlive.SuccessfulExit=false`：非正常退出后由 launchd 重启。
-- `StartInterval=60`：进程退出后每分钟尝试启动，用于紧急暂停到期恢复。
-- `StartCalendarInterval`：按安装参数生成周一至周五的十个日历条目，默认 10:00、19:10。
-- `ThrottleInterval=15`：限制短时间内反复启动。
-- `LimitLoadToSessionType=Aqua`：在图形登录会话中运行。
+不调用无法单独控制音量的系统 beep；两条播放路径均失败则写标准错误，窗口继续显示。包内声音和图标由项目生成，系统声音不随应用分发。
 
-`ProgramArguments` 同时写入规范化后的两个时间，登录、异常退出恢复和紧急暂停到期后继续使用安装时设置的时间。`--validate-times` 只校验并输出两个时间，不读写确认记录。
+## 设置与登录启动
 
-Apple 当前本机 `man launchd.plist` 说明：`StartInterval` 在睡眠期间会漏过；`StartCalendarInterval` 的遗漏触发会在唤醒时合并。程序依据持久化记录重新计算待办，不依赖触发次数恢复遗漏。LaunchAgent 的用户会话行为见 [Apple launchd 文档](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)；唤醒通知使用 [NSWorkspace.didWakeNotification](https://developer.apple.com/documentation/appkit/nsworkspace/didwakenotification)。
+`Sources/SettingsWindow.swift` 提供原生设置窗口。保存时间和音效后立即用于当前调度。登录启动开关即时调用 `Sources/LoginStartup.swift` 中的 `SMAppService.mainApp.register()` / `unregister()`，读取系统状态显示已开启、未开启、等待允许或不可用，不用自有布尔值伪装注册成功。
 
-## 窗口与退出
+macOS 原生登录项由系统服务管理。新版不再写自定义 LaunchAgent，也不配置异常退出自动重启；进程退出后需再次打开或等待已启用的下次登录。应用需从 `/Applications` 或 `~/Applications` 运行后才能开启登录启动。
 
-每个显示器有一个同步显示当前待办的窗口；任一窗口确认后同步更新。窗口采用 `NSPanel`、`screenSaver` 层级、`canJoinAllSpaces` 和 [`fullScreenAuxiliary`](https://developer.apple.com/documentation/appkit/nswindow/collectionbehavior-swift.struct/fullscreenauxiliary)。每 5 秒将窗口放回前面；只在首次展示、切换待办或重建窗口时请求激活，避免持续抢走考勤页面的键盘焦点。
+旧版迁移只处理标签为 `local.clockin.reminder` 的用户 LaunchAgent。先读取原时间，停止旧服务，再把旧 plist 改名为 `.disabled-UUID` 备份。新应用保留 bundle ID 和状态目录，沿用确认记录。迁移不替用户开启新登录项。
 
-窗口不提供普通关闭和最小化按钮。确认按钮没有回车快捷键，避免提醒突然出现时把正在输入的回车当作打卡确认。用户仍可用键盘辅助导航选择按钮。
+设置保存于 `~/Library/Application Support/ClockInReminder/preferences.json`；确认记录为同目录 `confirmations.json`；暂停为 `emergency-pause.json`；`instance.lock` 是单实例锁文件。旧版 `~/Library/Logs/ClockInReminder` 日志不再追加，新版错误输出到标准错误。
 
-强提醒依赖普通 macOS 应用窗口机制，无法阻止“强制退出”、系统注销、关机或卸载，也不能覆盖锁屏和系统安全界面。Spaces、全屏应用和多显示器的实际显示受系统设置影响，验证范围见验证记录。程序不屏蔽系统输入、不改变系统音量、不禁用安全退出。
+`LSUIElement=true` 和 `.accessory` 激活策略用于隐藏 Dock 图标；菜单栏使用单个模板图标，适应系统明暗模式。程序不联网，不请求通知、辅助功能或屏幕录制权限。
 
-每 30 秒尝试播放系统 `Ping` 音效，失败则使用包内 `reminder.wav`。两条播放路径都使用 `NSSound.volume` 控制提示音自身音量，按 20%、40%、60%、80%、100% 递增，此后保持 100%。每条新待办、重新启动或紧急暂停后恢复，均从 20% 开始；同一待办的窗口重建不重置音量。
+## 开发接口
 
-程序不调用无法单独控制音量的系统 `beep` 作为后备，避免低音量阶段突然以系统音量播放。两条播放路径均失败时写错误日志，窗口继续提醒。[NSSound.volume](https://developer.apple.com/documentation/appkit/nssound/volume) 不改变系统音量；静音、输出设备和系统音效设置仍会影响听感。`Resources/reminder.wav` 为程序生成的双频提示音。
-
-## 文件与持久化
-
-| 路径 | 内容 |
-| --- | --- |
-| `~/Applications/ClockInReminder.app` | 程序及内置卸载脚本 |
-| `~/Library/LaunchAgents/local.clockin.reminder.plist` | 登录启动与恢复配置 |
-| `~/Library/Application Support/ClockInReminder/confirmations.json` | 启用日期、逐日确认记录 |
-| `~/Library/Application Support/ClockInReminder/emergency-pause.json` | 最近一次紧急暂停期限 |
-| `~/Library/Application Support/ClockInReminder/instance.lock` | 单实例写锁；空文件保留属于正常情况 |
-| `~/Library/Logs/ClockInReminder/agent.log` | 标准输出 |
-| `~/Library/Logs/ClockInReminder/agent-error.log` | 错误及暂停期间的启动说明 |
-
-`Sources/ReminderCore.swift` 用独占文件锁防止双实例同时写入。确认文件通过原子替换写入，并同步文件内容，写入成功后才推进内存状态。记录包含计划时间、确认时间和时区。程序不收集公司账号、密码或考勤接口信息。
-
-## 开发与隔离验收
+在已退出常驻实例后，直接执行应用内程序可指定时间；两个参数分别为上班和下班：
 
 ```bash
-bash test.sh
-bash build.sh
-bash Tests/cli.sh
-bash Tests/integration.sh
+dist/AttendanceReminder.app/Contents/MacOS/ClockInReminder 10:10 19:10
 ```
 
-`Tests/integration.sh` 在临时目录安装和卸载，不注册后台服务。`install.sh --stage /absolute/test-directory` 提供相同的隔离安装方式，`uninstall.sh --stage /absolute/test-directory` 删除该副本。不要把隔离目录设置为现有的用户目录。
+显式参数会保存到设置；仅传第一个时，第二个为 19:10。无参数时沿用已保存设置，全新安装才使用 10:00、19:10。支持单数字小时和中文冒号；上班必须早于同日下班，不支持跨夜班次。正在运行时修改设置请用界面，启动第二个实例只会显示已有实例的设置。
 
-命令行支持 `--state-dir /absolute/path`，供独立状态验证；演示使用 `--preview`，不读取或写入正式状态。`--preview --silent --auto-exit 30` 可用于自动退出的静音演示。正式模式不接受静音或自动退出参数。
+`--status` 只读取确认状态，默认使用已保存时间。`--validate-times` 校验输入并输出规范化时间，不读写状态。`--configure` 在未运行时保存时间，供开发者安装脚本调用。
+
+`--preview [--silent] [--auto-exit 1...300]` 演示提醒，可读取已保存音效，不写正式确认。`--settings-preview` 演示设置，不读写用户数据，也不修改系统登录项。`--state-dir /absolute/path` 指定隔离状态目录；它不隔离系统登录项，所以测试不得调用登录启动开关。
+
+`Tests/integration.sh` 使用临时目录执行安装、更新和卸载，不注册系统登录项。`install.sh --stage /absolute/test-directory`、`uninstall.sh --stage /absolute/test-directory` 提供相同隔离入口。`--purge` 仅对需要销毁的测试数据使用。
+
+## 平台依据
+
+- [Apple SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice)：登录项注册及状态。
+- [NSWorkspace.didWakeNotification](https://developer.apple.com/documentation/appkit/nsworkspace/didwakenotification)：睡眠唤醒通知。
+- [NSSound.volume](https://developer.apple.com/documentation/appkit/nssound/volume)：提示音自身音量。
