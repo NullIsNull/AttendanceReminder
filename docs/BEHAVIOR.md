@@ -24,13 +24,17 @@
 
 ## 窗口与声音
 
-每个显示器有一个同步的 `NSPanel`，使用 `screenSaver` 层级、`canJoinAllSpaces` 和 `fullScreenAuxiliary`。窗口可拖动，每 5 秒重新置前；只在首次显示、切换待办或重建时激活，避免持续抢夺考勤页面的键盘焦点。设置窗口在提醒之上，可关闭。
+每个显示器有一个同步的 `NSPanel`，使用 `screenSaver` 层级、`canJoinAllSpaces` 和 `fullScreenAuxiliary`。窗口可拖动，每 5 秒重新置前；只在首次显示、切换待办或重建时激活，避免持续抢夺考勤页面的键盘焦点。打开设置前收起所有提醒窗口并停止声音；设置可见时调度不创建窗口、不抢焦点。关闭设置后重新检查待办。实例冲突和读取错误只在设置内显示可关闭的状态提示，不创建置顶错误面板。
 
 提醒不提供关闭和最小化按钮；确认按钮不绑定回车，避免出现时误接收正在输入的回车。保留暂停、紧急退出及系统强制退出。普通应用窗口不能覆盖锁屏和系统安全界面，也不能阻止注销或关机。
 
 `Sources/ReminderAudio.swift` 使用 `NSSound`。系统音效不可用时改用包内 `reminder.wav`；两条路径均按设置限制音量。每 30 秒播放一次，渐强档位为 20%、40%、60%、80%、100%，乘以配置的最大音量。每条新提醒或暂停恢复后重置，显示器变化造成的同一待办窗口重建不重置。关闭渐强后固定为最大音量，静音选项不播放。
 
 不调用无法单独控制音量的系统 beep；两条播放路径均失败则写标准错误，窗口继续显示。包内声音和图标由项目生成，系统声音不随应用分发。
+
+`Sources/Appearance.swift` 通过 `NSGlassEffectView.contentView` 承载窗口内容。macOS 26 及以上使用原生玻璃，macOS 13–15 使用 `NSVisualEffectView`；减少透明度时使用实色，增加对比度时强化边框。监听辅助功能显示设置变化，并使用语义颜色跟随明暗外观。
+
+设置中的校验、写盘和登录项错误使用行内提示，迁移确认使用附属 sheet，避免高层级模态窗口阻挡输入。滑块连续发送数值变化；保存前结束日期控件编辑，读取最后输入的时刻。
 
 ## 设置与登录启动
 
@@ -52,7 +56,7 @@ macOS 原生登录项由系统服务管理。新版不再写自定义 LaunchAgen
 dist/AttendanceReminder.app/Contents/MacOS/ClockInReminder 10:10 19:10
 ```
 
-显式参数会保存到设置；仅传第一个时，第二个为 19:10。无参数时沿用已保存设置，全新安装才使用 10:00、19:10。支持单数字小时和中文冒号；上班必须早于同日下班，不支持跨夜班次。正在运行时修改设置请用界面，启动第二个实例只会显示已有实例的设置。
+显式参数会保存到设置；仅传第一个时，第二个为 19:10。无参数时沿用已保存设置，全新安装才使用 10:00、19:10。支持单数字小时和中文冒号；上班必须早于同日下班，不支持跨夜班次。正在运行时修改设置请用界面，启动第二个实例时通过通知请求已有实例显示设置；收到持锁实例的回执后退出新实例。没有回执时保留可关闭的冲突提示，不凭磁盘上的版本号判断正在运行的版本。
 
 `--status` 只读取确认状态，默认使用已保存时间。`--validate-times` 校验输入并输出规范化时间，不读写状态。`--configure` 在未运行时保存时间，供开发者安装脚本调用。
 
@@ -65,3 +69,7 @@ dist/AttendanceReminder.app/Contents/MacOS/ClockInReminder 10:10 19:10
 - [Apple SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice)：登录项注册及状态。
 - [NSWorkspace.didWakeNotification](https://developer.apple.com/documentation/appkit/nsworkspace/didwakenotification)：睡眠唤醒通知。
 - [NSSound.volume](https://developer.apple.com/documentation/appkit/nssound/volume)：提示音自身音量。
+
+[Apple Liquid Glass / AppKit 设计说明](https://developer.apple.com/videos/play/wwdc2025/310/)说明玻璃内容承载、系统控件形状与颜色层级。
+
+`Tests/interface-preview.sh /absolute/test-directory settings|conflict|reminder [dark]` 构建隔离界面测试程序：使用独立记录、禁用系统登录项变更，5 分钟后自动退出。冲突模式持有第二个文件锁，用于复验保存失败仍可关闭设置。

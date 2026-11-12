@@ -4,14 +4,18 @@
 
 ## DMG 安装
 
-1. 打开 `AttendanceReminder-2.0.0.dmg`。
+1. 打开 `AttendanceReminder-2.1.0.dmg`。
 2. 把 `AttendanceReminder` 拖入 `Applications`（应用程序）。
 3. 从“应用程序”打开，设置上下班时间、音效和最大音量，点击“保存设置”。
-4. 需要登录后自动运行时，勾选“登录 Mac 时自动启动”。
+4. 需要登录后自动运行时，开启“登录 Mac 时自动启动”。
 
 应用只显示右上角菜单栏图标，Dock 不显示图标。再次打开应用或点击菜单栏“设置…”可修改设置。安装后可推出 DMG。
 
 安装包采用本地临时签名，未做 Apple Developer ID 签名或公证。首次打开可能被 macOS 拦截；确认文件来源后，可在“系统设置 → 隐私与安全性”中允许打开。不需要关闭系统安全检查。没有 DMG 时可按下文从源码构建。
+
+安装盘只显示应用和“应用程序”入口。使用说明保留在应用菜单和包内。
+
+macOS 26 及以上采用原生 Liquid Glass；较早系统使用磨砂材质。外观跟随系统明暗设置，开启“减少透明度”时使用实色面板。
 
 ## 功能
 
@@ -27,7 +31,7 @@
 
 ## 从源码构建
 
-需要 Apple Command Line Tools，缺少时执行 `xcode-select --install`。在 macOS 终端运行：
+构建需要带 macOS 26 或更新 SDK 的 Apple Command Line Tools，运行仍支持 macOS 13 及以上。缺少工具时执行 `xcode-select --install`。在 macOS 终端运行：
 
 ```bash
 git clone git@github.com:NullIsNull/AttendanceReminder.git
@@ -39,6 +43,6 @@ bash Tests/integration.sh
 bash package-dmg.sh --no-build
 ```
 
-产物为 `dist/AttendanceReminder.app` 和 `dist/AttendanceReminder-2.0.0.dmg`。源码使用 GPL-3.0-only，完整许可证见 [LICENSE](LICENSE)。图标、脚本、文档和自带生成音效适用同一许可证；macOS 系统音效不包含在仓库中。
+产物为 `dist/AttendanceReminder.app` 和 `dist/AttendanceReminder-2.1.0.dmg`。源码使用 GPL-3.0-only，完整许可证见 [LICENSE](LICENSE)。图标、脚本、文档和自带生成音效适用同一许可证；macOS 系统音效不包含在仓库中。
 
 开发者仍可使用 `bash install.sh [上班时间] [下班时间] --prebuilt` 安装到 `~/Applications`，以及 `bash uninstall.sh` 卸载。脚本不自动修改登录启动；日常使用通过 DMG 和设置界面完成。

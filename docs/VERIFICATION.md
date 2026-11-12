@@ -1,25 +1,37 @@
 # 验证记录
 
-版本：2.0.0。日期：2026-11-12，Asia/Singapore。环境：Apple Silicon、macOS 27.2（26B123）、Apple Swift 6.4.2、Command Line Tools。
+版本：2.1.0。日期：2026-11-12，Asia/Singapore。环境：Apple Silicon、macOS 27.2（26B123）、Apple Swift 6.4.2、Command Line Tools。
 
-## 已验证
+## 编译与自动检查
 
 | 项目 | 结果 |
 | --- | --- |
-| 原生编译 | arm64、x86_64 均成功，合并为 Universal 2，最低目标 macOS 13 |
-| Intel 指令执行 | Apple Silicon 上通过 Rosetta 运行 x86_64 命令，输出自定义时间 10:10 / 19:10 |
+| 原生编译 | arm64、x86_64 均成功，Universal 2，最低运行目标 macOS 13 |
 | 本地签名 | codesign 严格验证通过，隔离安装副本也通过 |
 | 核心逻辑 | 49 项测试通过，0 项失败 |
 | 命令行 | 默认、单参数、双参数、中文冒号、非法参数拒绝且不写状态通过 |
-| 隔离安装 | 包含空格、中文、& 的路径安装成功；更新保留设置和确认记录 |
-| 隔离卸载 | 默认保留数据，重装沿用；清除模式删除测试数据 |
-| 原生设置窗口 | 已取得截图，时间、声音、渐强、音量、启动状态与保存按钮完整显示 |
-| 界面操作 | 独立预览中将时间从 10:00 改为 10:01、音效改为 Glass、音量改为 60%、关闭渐强，并点击保存结束预览 |
-| 应用图标 | 原生生成 ICNS，sips 可读取 1024 × 1024 图像 |
-| DMG | HFS+ 文件系统、UDZO 压缩，hdiutil verify 校验通过 |
-| Dock 配置 | Info.plist 的 LSUIElement 为 true，运行入口设置 accessory 激活策略 |
+| 隔离安装与卸载 | 更新保留设置和确认记录，默认卸载保留数据，重装沿用，清除模式删除测试数据 |
+| Intel 指令执行 | Rosetta 下 x86_64 命令输出 10:10 / 19:10 |
+| DMG | HFS+、UDZO；hdiutil verify 校验通过，打包内容仅应用和 Applications 链接 |
 
-49 项测试覆盖时间边界、五个工作日和周末、睡眠跨两次提醒、跨天遗漏、启用当日补提醒、确认持久化和重启去重、双次确认、重复点击、时钟回拨、时区与夏令时、损坏记录、未知版本、写入失败、单实例锁、暂停持久化、渐强档位、设置持久化、设置和确认分离、音量与时间校验、全部音效往返、旧版参数解析和登录状态文案。
+核心测试覆盖调度边界、工作日和周末、唤醒补提醒计算、跨天遗漏、确认持久化和去重、时区与夏令时、损坏文件、写入失败、锁、暂停、音量渐强及设置持久化。
+
+## 本机界面回归
+
+使用 `Tests/interface-preview.sh` 构建独立测试应用。它运行实际设置和提醒代码，使用隔离状态目录，禁用系统登录项变更。测试应用记录窗口可见状态，避免界面检查工具重新激活应用时把重新打开误判为关闭失败。
+
+| 场景 | 操作与观察 |
+| --- | --- |
+| 浅色设置 | 原生玻璃面板、时间、音效、开关、音量和保存按钮完整显示 |
+| 音量拖动 | 实际鼠标拖动从 100% 到约 51%，标签实时变化 |
+| 设置保存 | 修改时间、Glass 音效、渐强开关和音量，JSON 文件与重新打开的控件一致 |
+| 保存后关闭 | 再保存音量 75%，文件为 0.75；窗口状态为 settingsVisible=false、reminderWindows=0 |
+| 非法时间 | 上下班设为同一时刻，显示“未保存：上班时间须早于同一天的下班时间。”；仍可继续操作 |
+| 实例占用 | 同一目录持有第二个文件锁，设置显示行内冲突提示；保存失败原因可见，原设置未被覆盖 |
+| 冲突后关闭 | 点击“关闭”后 settingsVisible=false、reminderWindows=0，没有置顶错误面板 |
+| 深色提醒 | 已取得玻璃提醒窗口截图，确认按钮使用系统蓝色和白色内容 |
+| 提醒与设置切换 | 两个显示器的提醒在打开设置后变为 0，关闭设置后恢复为 2 |
+| 退出 | 测试副本退出后释放锁，无测试进程残留 |
 
 复验命令：
 
@@ -29,21 +41,19 @@ bash build.sh
 bash Tests/cli.sh
 bash Tests/integration.sh
 bash package-dmg.sh --no-build
+bash Tests/interface-preview.sh /absolute/test-directory settings
+bash Tests/interface-preview.sh /absolute/test-directory conflict
+bash Tests/interface-preview.sh /absolute/test-directory reminder dark
 ```
+
+界面测试程序不随正式应用分发。`conflict` 模式故意保持文件锁占用，用于验证错误后的交互；最多运行 5 分钟。其状态目录内记录及同级 `status-*.json` 均为测试数据。
 
 ## 验证边界
 
-设置窗口使用独立预览副本，不修改正式打卡记录或系统登录项。已操作保存按钮；真实磁盘持久化由核心和隔离安装测试验证。没有在用户账号上实际注册、注销登录项，也没有执行旧版服务迁移、注销登录、重启或睡眠；相关系统交付行为仍需安装后的实机验收。旧版时间解析已测试，停止旧服务和备份 plist 的完整迁移未实测。
+未通过 Finder 实际挂载新版 DMG 并拖入“应用程序”，未切换系统减少透明度和增加对比度设置，未逐一实测旧版 macOS、Intel 实体机和其他应用的全屏空间。兼容外观与 Dock 隐藏依据是代码分支、系统颜色和 LSUIElement / accessory 配置。
 
-没有逐一实测多显示器、其他应用全屏空间、锁屏恢复、声音实际听感、Intel 实体机和 macOS 13–26。设置窗口截图不包含整个 Dock，Dock 隐藏的验证依据是应用配置与运行策略。
+未注册、注销真实登录项，未进行旧版 LaunchAgent 完整迁移、实际睡眠、重启或注销登录。没有修改或清空用户的正式确认记录。跨进程通知回执分支尚未单独完成双进程交互验收；文件锁占用场景已通过上述界面回归。
 
-Intel 编译时工具链给出警告，但链接完成：
+当前环境不能使用 DiskManagement 服务，打包采用 `makehybrid -hfs` 生成文件后转为 UDZO，无需挂载临时磁盘。Intel 编译有工具链缺少 x86_64 的 `libswiftCompatibilityPacks.a` 警告，链接和 Rosetta 命令仍通过。
 
-```text
-ld: warning: ignoring file '.../libswiftCompatibilityPacks.a':
-fat file missing arch 'x86_64', file has 'arm64,arm64e'
-```
-
-安装包采用本地临时签名，未做 Developer ID 签名或 Apple 公证，未宣称通过下载隔离后的 Gatekeeper 分发验收。
-
-本次环境无法使用 DiskManagement 服务，`hdiutil create` 和 `imageinfo` 返回“设备未配置”。打包改为 `makehybrid -hfs` 直接生成文件，再转换为 UDZO；校验成功。未通过 Finder 实际挂载和拖入“应用程序”验收。
+安装包使用本地临时签名，未做 Developer ID 签名或 Apple 公证，未验证下载隔离后的 Gatekeeper 分发流程。
