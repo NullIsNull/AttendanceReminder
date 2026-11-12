@@ -6,6 +6,16 @@
 
 先把应用拖入“应用程序”再运行；直接在 DMG 中运行时，开启登录启动会提示先安装。普通用户安装可能由 Finder 请求管理员确认，这是目标“应用程序”目录的权限要求。
 
+## Finder 提示应用没有响应
+
+2.1.3 及之前的 DMG 使用 `makehybrid`，会在包内资源写入 `com.apple.FinderInfo`，导致应用签名完整性检查失败。2.1.4 改用标准磁盘镜像创建方式，并检查挂载、复制后的应用。镜像自身校验通过不能证明应用签名有效。
+
+若旧版进程卡住，在活动监视器查找 `ClockInReminder` 并退出，再安装 2.1.4 或更新版本。替换应用不会删除设置和确认记录。不要反复双击卡住的副本。
+
+应用仍未经过 Apple Developer ID 签名和公证。系统显示“无法验证开发者”时，需由用户核对来源并在“系统设置 → 隐私与安全性”中决定是否允许打开。不要把安全提示等待当作应用已经启动，也不要通过清除隔离标记或关闭 Gatekeeper 处理。
+
+开发者可运行 `codesign --verify --strict /Applications/AttendanceReminder.app` 检查文件完整性；这项检查通过不等于通过 Apple 公证。参见 [Apple 的 FinderInfo 签名说明](https://developer.apple.com/library/archive/qa/qa1940/_index.html) 和 [安全打开应用说明](https://support.apple.com/en-us/102445)。
+
 ## 菜单栏没有图标
 
 从“应用程序”重新打开 AttendanceReminder。应用运行时只有右上角菜单栏图标，Dock 没有图标。图标过多时可检查菜单栏管理工具是否隐藏了它。

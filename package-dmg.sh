@@ -13,9 +13,9 @@ mkdir -p "$content"
 ln -s /Applications "$content/Applications"
 version="$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")"
 output="$project_dir/dist/AttendanceReminder-$version.dmg"
-# 直接生成 HFS+ 文件，再压缩成 DMG，打包时无需挂载临时磁盘。
-/usr/bin/hdiutil makehybrid -hfs -hfs-volume-name AttendanceReminder \
-    -hfs-openfolder "$content" -o "$stage/uncompressed.dmg" "$content"
-/usr/bin/hdiutil convert "$stage/uncompressed.dmg" -format UDZO -ov -o "$output"
-/usr/bin/hdiutil verify "$output"
+# makehybrid 会给资源文件写入 FinderInfo，导致挂载后的签名校验失败。
+/usr/bin/hdiutil create -srcfolder "$content" -volname AttendanceReminder \
+    -fs HFS+ -format UDZO -ov "$stage/AttendanceReminder.dmg"
+/bin/bash "$project_dir/Tests/dmg.sh" "$stage/AttendanceReminder.dmg" "$app"
+/bin/mv -f "$stage/AttendanceReminder.dmg" "$output"
 echo "已生成：$output"

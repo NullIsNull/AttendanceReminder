@@ -1,6 +1,17 @@
 # 验证记录
 
-版本：2.1.3。日期：2026-11-12，Asia/Singapore。环境：Apple Silicon、macOS 27.2（26B123）、Apple Swift 6.4.2、Command Line Tools。
+版本：2.1.4。日期：2026-11-12，Asia/Singapore。环境：Apple Silicon、macOS 27.2（26B123）、Apple Swift 6.4.2、Command Line Tools。
+
+## 2.1.4 安装包回归
+
+- 现场卡住的进程停在 `_dyld_start`，尚未进入应用主逻辑。系统日志记录 Gatekeeper 拒绝及随后等待用户响应。
+- 2.1.3 打包前的应用签名有效，但 DMG 挂载及安装副本含 `com.apple.FinderInfo`，严格签名检查失败。该错误来自 `makehybrid` 生成的镜像。
+- 新增 `Tests/dmg.sh`：旧 2.1.3 镜像的校验和通过，但脚本在挂载后签名检查处退出，成功检出此前漏测的问题。
+- 标准 `hdiutil create -srcfolder` 生成的测试镜像，挂载和复制后的应用均通过严格签名检查，中文文件名保留。
+- 本机已安装副本仅清除错误的 FinderInfo，签名检查恢复通过；隔离标记及设置、确认文件字节未变。没有自动放行 Gatekeeper。
+- 正式安装包的挂载、复制检查由打包脚本强制执行，通过后才输出 DMG。应用源代码与 2.1.3 相同，仅版本、打包和文档更新。
+
+以下保留 2.1.3 及更早版本的应用功能验证记录。
 
 ## 编译与自动检查
 
@@ -88,6 +99,7 @@ bash Tests/cli.sh
 bash Tests/audio.sh
 bash Tests/integration.sh
 bash package-dmg.sh --no-build
+bash Tests/dmg.sh dist/AttendanceReminder-2.1.4.dmg dist/AttendanceReminder.app
 bash Tests/interface-preview.sh /absolute/test-directory settings
 bash Tests/interface-preview.sh /absolute/test-directory conflict
 bash Tests/interface-preview.sh /absolute/test-directory reminder dark
@@ -106,6 +118,6 @@ bash Tests/interface-preview.sh /absolute/test-directory background
 
 未注册、注销真实登录项，未进行旧版 LaunchAgent 完整迁移、Mac 实际睡眠、重启或注销登录。没有修改或清空用户的正式确认记录。跨进程通知回执分支尚未单独完成双进程交互验收；文件锁占用场景已通过上述界面回归。
 
-当前环境不能使用 DiskManagement 服务，打包采用 `makehybrid -hfs` 生成文件后转为 UDZO，无需挂载临时磁盘。Intel 编译有工具链缺少 x86_64 的 `libswiftCompatibilityPacks.a` 警告，链接和 Rosetta 命令仍通过。
+2.1.3 曾因受限执行环境无法使用 DiskManagement 而改用 `makehybrid -hfs`，未检查挂载后的签名；此方式已被 2.1.4 移除。2.1.4 使用获准访问系统磁盘服务的标准打包流程。Intel 编译有工具链缺少 x86_64 的 `libswiftCompatibilityPacks.a` 警告，链接和 Rosetta 命令仍通过。
 
 安装包使用本地临时签名，未做 Developer ID 签名或 Apple 公证，未验证下载隔离后的 Gatekeeper 分发流程。
